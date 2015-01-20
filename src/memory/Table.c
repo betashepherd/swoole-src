@@ -70,7 +70,7 @@ swTable* swTable_new(uint32_t rows_size)
     }
     else
     {
-        uint32_t i = 3;
+        uint32_t i = 10;
         while ((1U << i) < rows_size)
         {
             i++;
@@ -361,6 +361,7 @@ swTableRow* swTableRow_set(swTable *table, char *key, int keylen)
             {
                 table->lock.lock(&table->lock);
                 swTableRow *new_row = table->pool->alloc(table->pool, 0);
+
 #ifdef SW_TABLE_DEBUG
                 conflict_count ++;
 #endif

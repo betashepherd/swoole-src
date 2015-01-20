@@ -251,6 +251,13 @@ snprintf(sw_error,SW_ERROR_MSG_SIZE,"%s: "str" Error: %s[%d].",__func__,##__VA_A
 swLog_put(SW_LOG_WARN, sw_error);\
 SwooleG.lock.unlock(&SwooleG.lock)
 
+#ifdef SW_DEBUG_REMOTE_OPEN
+#define swDebug(str,...) int __debug_log_n = snprintf(sw_error,SW_ERROR_MSG_SIZE,str,##__VA_ARGS__);\
+write(SwooleG.debug_fd, sw_error, __debug_log_n);
+#else
+#define swDebug(str,...)
+#endif
+
 #ifdef SW_DEBUG
 #define swTrace(str,...)       {printf("[%s:%d@%s]"str"\n",__FILE__,__LINE__,__func__,##__VA_ARGS__);}
 //#define swWarn(str,...)        {printf("[%s:%d@%s]"str"\n",__FILE__,__LINE__,__func__,##__VA_ARGS__);}
@@ -330,6 +337,7 @@ typedef struct _swConnection
     uint32_t closed :1;
     uint32_t closing :1;
     uint32_t removed :1;
+    uint32_t overflow :1;
 
     uint32_t tcp_nopush :1;
     uint32_t tcp_nodelay :1;
@@ -825,6 +833,7 @@ int swoole_sync_writefile(int fd, void *data, int len);
 int swoole_sync_readfile(int fd, void *buf, int len);
 int swoole_system_random(int min, int max);
 swString* swoole_file_get_contents(char *filename);
+void swoole_open_remote_debug(void);
 
 void swoole_ioctl_set_block(int sock, int nonblock);
 void swoole_fcntl_set_block(int sock, int nonblock);
@@ -1371,6 +1380,7 @@ typedef struct
     int signal_fd;
     int log_fd;
     int null_fd;
+    int debug_fd;
 
     /**
      * worker(worker and task_worker) process chroot / user / group

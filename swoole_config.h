@@ -21,11 +21,15 @@
 #define SW_MAX_WORKER_GROUP        2
 #define SW_MAX_FILE_CONTENT        (64*1024*1024) //for swoole_file_get_contents
 
-//#ifndef SW_USE_RINGBUFFER
-//#define SW_USE_RINGBUFFER
-//#endif
+#ifndef SW_USE_RINGBUFFER
+#define SW_USE_RINGBUFFER
+#endif
 
 #define SW_USE_EVENT_TIMER
+
+//#define SW_DEBUG_REMOTE_OPEN
+#define SW_DEBUG_SERVER_HOST       "127.0.0.1"
+#define SW_DEBUG_SERVER_PORT       9999
 
 #define SW_SOCKET_OVERFLOW_WAIT    100
 #define SW_SOCKET_BUFFER_SIZE      (8*1024*1024)  //UDP socket的buffer区大小
@@ -125,10 +129,12 @@
 #define SW_RINGQUEUE_LEN                 1024           //RingQueue队列长度
 #define SW_RINGQUEUE_MEMSIZE             (1024*1024*4)  //内存区大小,默认分配4M的内存
 
+
 //#define SW_USE_RINGQUEUE_TS            1     //使用线程安全版本的RingQueue
 #define SW_RINGBUFFER_COLLECT_N          100   //collect max_count
 #define SW_RINGBUFFER_FREE_N_MAX         4     //when free_n > MAX, execute collect
 #define SW_RINGBUFFER_WARNING            100
+//#define SW_RINGBUFFER_DEBUG
 
 /**
  * ringbuffer memory pool size
@@ -153,14 +159,15 @@
 //#define SW_USE_EPOLLET
 #define SW_USE_EVENTFD                   //是否使用eventfd来做消息通知，需要Linux 2.6.22以上版本才会支持
 
-#define SW_TASK_TMP_FILE                 "/tmp/swoole/task.XXXXXX"
+#define SW_TASK_TMP_FILE                 "/tmp/swoole.task.XXXXXX"
 
 #define SW_DIR_MAXLEN                    128
 #define SW_FILE_CHUNK_SIZE               65536
 
 #define SW_TABLE_CONFLICT_PROPORTION     0.2 //20%
 #define SW_TABLE_COMPRESS_PROPORTION     0.5 //50% skip, will compress the row list
-#define SW_TABLE_USE_PHP_HASH
+//#define SW_TABLE_USE_PHP_HASH
+//#define SW_TABLE_DEBUG
 
 #define SW_SSL_BUFSIZE  16384
 
