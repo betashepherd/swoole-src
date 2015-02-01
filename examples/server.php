@@ -27,8 +27,8 @@ if (isset($argv[1]) and $argv[1] == 'daemon') {
 $serv = new swoole_server("0.0.0.0", 9501);
 $serv->addlistener('0.0.0.0', 9502, SWOOLE_SOCK_UDP);
 
-$process1 = new swoole_process("my_process1", false, false);
-//$serv->addprocess($process1);
+$process1 = new swoole_process("my_process1", true, false);
+$serv->addprocess($process1);
 
 $serv->set($config);
 /**
@@ -139,6 +139,7 @@ function my_onClose($serv, $fd, $from_id)
 function my_onConnect($serv, $fd, $from_id)
 {
     //throw new Exception("hello world");
+    var_dump($serv->connection_info($fd));
     echo "Worker#{$serv->worker_pid} Client[$fd@$from_id]: Connect.\n";
 }
 
@@ -146,7 +147,7 @@ function my_onWorkerStart($serv, $worker_id)
 {
 	//processRename($serv, $worker_id);
 	//forkChildInWorker();
-	setTimerInWorker($serv, $worker_id);
+	//setTimerInWorker($serv, $worker_id);
 }
 
 function my_onWorkerStop($serv, $worker_id)

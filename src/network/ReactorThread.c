@@ -175,7 +175,6 @@ int swReactorThread_close(swReactor *reactor, int fd)
             }
             conn->object = NULL;
         }
-
     }
 
 #if 0
@@ -357,16 +356,6 @@ int swReactorThread_send(swSendData *_send)
     swServer *serv = SwooleG.serv;
 
     int fd = _send->info.fd;
-    uint16_t reactor_id = 0;
-
-#if SW_REACTOR_SCHEDULE == 2
-    reactor_id = fd % serv->reactor_num;
-#else
-    reactor_id = conn->from_id;
-#endif
-
-    swBuffer_trunk *trunk;
-    swReactor *reactor = &(serv->reactor_threads[reactor_id].reactor);
 
     swConnection *conn = swServer_connection_get(serv, fd);
     //The connection has been closed.
@@ -375,15 +364,13 @@ int swReactorThread_send(swSendData *_send)
         swWarn("connection[fd=%d, event=%d] is not active.", fd, _send->info.type);
         return SW_ERR;
     }
-    //The connection has been removed from eventloop.
-    else if (conn->removed)
-    {
-        goto close_fd;
-    }
+
+    swBuffer_trunk *trunk;
+    swReactor *reactor = &(serv->reactor_threads[conn->from_id].reactor);
 
     swTraceLog(SW_TRACE_EVENT, "send-data. fd=%d|reactor_id=%d", fd, reactor_id);
 
-    if (conn->out_buffer == NULL)
+    if (conn->direct_send && conn->out_buffer == NULL)
     {
         /**
         * close connection.
@@ -394,53 +381,51 @@ int swReactorThread_send(swSendData *_send)
             reactor->close(reactor, fd);
             return SW_OK;
         }
-#ifdef SW_REACTOR_SYNC_SEND
-        //Direct send
+
+        //direct send
         if (_send->info.type != SW_EVENT_SENDFILE)
         {
-            int n;
-
             direct_send:
-            n = swConnection_send(conn, _send->data, _send->length, 0);
-            if (n == _send->length)
             {
-                return SW_OK;
-            }
-            else if (n > 0)
-            {
-                _send->data += n;
-                _send->length -= n;
-                goto buffer_send;
-            }
-            else if (errno == EINTR)
-            {
-                goto direct_send;
-            }
-            else
-            {
-                goto buffer_send;
-            }
-        }
-#endif
-            //Buffer send
-        else
-        {
-#ifdef SW_REACTOR_SYNC_SEND
-            buffer_send:
-#endif
-            conn->out_buffer = swBuffer_new(SW_BUFFER_SIZE);
-            if (conn->out_buffer == NULL)
-            {
-                return SW_ERR;
+                int n = swConnection_send(conn, _send->data, _send->length, 0);
+                if (n == _send->length)
+                {
+                    return SW_OK;
+                }
+                else if (n > 0)
+                {
+                    _send->data += n;
+                    _send->length -= n;
+                }
+                else
+                {
+                    if (swConnection_error(errno) == SW_CLOSE)
+                    {
+                        conn->close_wait = 1;
+                        return SW_OK;
+                    }
+                    else if (errno == EINTR)
+                    {
+                        goto direct_send;
+                    }
+                }
             }
         }
     }
 
-    //listen EPOLLOUT event
-    if (reactor->set(reactor, fd, SW_EVENT_TCP | SW_EVENT_WRITE | SW_EVENT_READ) < 0
-            && (errno == EBADF || errno == ENOENT))
+    if (conn->out_buffer == NULL)
     {
-        goto close_fd;
+        conn->out_buffer = swBuffer_new(SW_BUFFER_SIZE);
+        if (conn->out_buffer == NULL)
+        {
+            return SW_ERR;
+        }
+        //listen EPOLLOUT event
+        if (reactor->set(reactor, fd, SW_EVENT_TCP | SW_EVENT_WRITE | SW_EVENT_READ) < 0
+                && (errno == EBADF || errno == ENOENT))
+        {
+            goto close_fd;
+        }
     }
 
     //close connection
@@ -449,23 +434,19 @@ int swReactorThread_send(swSendData *_send)
         trunk = swBuffer_new_trunk(conn->out_buffer, SW_CHUNK_CLOSE, 0);
         trunk->store.data.val1 = _send->info.type;
     }
-        //sendfile to client
+    //sendfile to client
     else if (_send->info.type == SW_EVENT_SENDFILE)
     {
         swConnection_sendfile(conn, _send->data);
     }
-        //send data
+    //send data
     else
     {
-        /**
-        * TODO: Connection output buffer overflow, close the connection.
-        */
         if (conn->out_buffer->length >= serv->buffer_output_size)
         {
             swWarn("Connection output buffer overflow.");
             conn->overflow = 1;
         }
-        //buffer enQueue
         swBuffer_append(conn->out_buffer, _send->data, _send->length);
     }
     return SW_OK;
@@ -1217,14 +1198,14 @@ static int swReactorThread_onReceive_websocket(swReactor *reactor, swEvent *even
 */
 static int swReactorThread_onReceive_http_request(swReactor *reactor, swEvent *event)
 {
-
-    int fd = event->fd;
     swServer *serv = reactor->ptr;
-    swConnection *conn = swServer_connection_get(serv, fd);
+    swConnection *conn = event->socket;
+
     if (conn->websocket_status >= WEBSOCKET_STATUS_HANDSHAKE)
     {
-        if(conn->websocket_status == WEBSOCKET_STATUS_HANDSHAKE) {
-            if(conn->object != NULL)
+        if (conn->websocket_status == WEBSOCKET_STATUS_HANDSHAKE)
+        {
+            if (conn->object != NULL)
             {
                 swHttpRequest *request = (swHttpRequest *) conn->object;
                 swHttpRequest_free(request);
@@ -1267,13 +1248,7 @@ static int swReactorThread_onReceive_http_request(swReactor *reactor, swEvent *e
         buf_len = request->buffer->size - request->buffer->length;
     }
 
-#ifdef SW_USE_EPOLLET
-    n = swRead(fd, buf, buf_len);
-#else
-    //非ET模式会持续通知
     n = swConnection_recv(conn, buf, buf_len, 0);
-#endif
-
     if (n < 0)
     {
         switch (swConnection_error(errno))
@@ -1323,10 +1298,10 @@ static int swReactorThread_onReceive_http_request(swReactor *reactor, swEvent *e
             goto close_fd;
         }
 
-//        swTrace("method: %d", request->method);
+        swTrace("request->method=%d", request->method);
 
         //GET HEAD DELETE OPTIONS
-        if (request->method == HTTP_GET || request->method == HTTP_HEAD || request->method == HTTP_OPTIONS || request->method == HTTP_DELETE )
+        if (request->method == HTTP_GET || request->method == HTTP_HEAD || request->method == HTTP_OPTIONS || request->method == HTTP_DELETE)
         {
             if (memcmp(buffer->str + buffer->length - 4, "\r\n\r\n", 4) == 0)
             {
@@ -1338,7 +1313,7 @@ static int swReactorThread_onReceive_http_request(swReactor *reactor, swEvent *e
                 swWarn("http header is too long.");
                 goto close_fd;
             }
-                //wait more data
+            //wait more data
             else
             {
                 wait_more_data:
@@ -1351,8 +1326,8 @@ static int swReactorThread_onReceive_http_request(swReactor *reactor, swEvent *e
                 goto recv_data;
             }
         }
-            //POST PUT
-        else if(request->method == HTTP_POST || request->method == HTTP_PUT || request->method == HTTP_PATCH)
+        //POST PUT
+        else if (request->method == HTTP_POST || request->method == HTTP_PUT || request->method == HTTP_PATCH)
         {
             if (request->content_length == 0)
             {
@@ -1375,7 +1350,15 @@ static int swReactorThread_onReceive_http_request(swReactor *reactor, swEvent *e
                 goto close_fd;
             }
 
-            if (request->content_length == buffer->length - request->header_length)
+            uint32_t request_size = request->content_length + request->header_length;
+
+            //discard the redundant data
+            if (buffer->length > request_size)
+            {
+                buffer->length = request_size;
+            }
+
+            if (buffer->length == request_size)
             {
                 swReactorThread_send_string_buffer(swServer_get_thread(serv, SwooleTG.id), conn, buffer);
                 swHttpRequest_free(request);
@@ -1395,7 +1378,7 @@ static int swReactorThread_onReceive_http_request(swReactor *reactor, swEvent *e
                 }
                 else
                 {
-                    buffer->size = request->content_length + request->header_length;
+                    buffer->size = request_size;
                 }
                 goto wait_more_data;
             }
@@ -1424,7 +1407,17 @@ int swReactorThread_create(swServer *serv)
         return SW_ERR;
     }
 
-    serv->connection_list = sw_shm_calloc(serv->max_connection, sizeof(swConnection));
+    /**
+    * alloc the memory for connection_list
+    */
+    if (serv->factory_mode == SW_MODE_PROCESS)
+    {
+        serv->connection_list = sw_shm_calloc(serv->max_connection, sizeof(swConnection));
+    }
+    else
+    {
+        serv->connection_list = sw_calloc(serv->max_connection, sizeof(swConnection));
+    }
     if (serv->connection_list == NULL)
     {
         swError("calloc[1] failed");
@@ -1436,7 +1429,7 @@ int swReactorThread_create(swServer *serv)
     {
         if (serv->worker_num < 1)
         {
-            swError("Fatal Error: serv->writer_num < 1");
+            swError("Fatal Error: serv->worker_num < 1");
             return SW_ERR;
         }
         ret = swFactoryThread_create(&(serv->factory), serv->worker_num);
@@ -1445,7 +1438,7 @@ int swReactorThread_create(swServer *serv)
     {
         if (serv->worker_num < 1)
         {
-            swError("Fatal Error: serv->writer_num < 1 or serv->worker_num < 1");
+            swError("Fatal Error: serv->worker_num < 1");
             return SW_ERR;
         }
         ret = swFactoryProcess_create(&(serv->factory), serv->worker_num);
@@ -1557,7 +1550,7 @@ static int swReactorThread_loop_tcp(swThreadParam *param)
     }
 #endif
 
-    ret = swReactor_auto(reactor, SW_REACTOR_MAXEVENTS);
+    ret = swReactor_create(reactor, SW_REACTOR_MAXEVENTS);
     if (ret < 0)
     {
         return SW_ERR;
@@ -1568,7 +1561,7 @@ static int swReactorThread_loop_tcp(swThreadParam *param)
     reactor->ptr = serv;
     reactor->id = reactor_id;
     reactor->thread = 1;
-    reactor->sockets = serv->connection_list;
+    reactor->socket_list = serv->connection_list;
     reactor->max_socket = serv->max_connection;
 
     reactor->onFinish = NULL;
@@ -1583,35 +1576,38 @@ static int swReactorThread_loop_tcp(swThreadParam *param)
     swReactorThread_set_protocol(serv, reactor);
 
     int i = 0, pipe_fd;
-    thread->buffer_pipe = swArray_new(serv->workers[serv->worker_num - 1].pipe_master + 1, sizeof(void*), 0);
 
-    for (i = 0; i < serv->worker_num; i++)
+    if (serv->factory_mode == SW_MODE_PROCESS)
     {
-        pipe_fd = serv->workers[i].pipe_master;
-        //for request
-        swBuffer *buffer = swBuffer_new(sizeof(swEventData));
-        if (!buffer)
+        thread->buffer_pipe = swArray_new(serv->workers[serv->worker_num - 1].pipe_master + 1, sizeof(void*), 0);
+
+        for (i = 0; i < serv->worker_num; i++)
         {
-            swWarn("create buffer failed.");
-            break;
-        }
-        if (swArray_store(thread->buffer_pipe, pipe_fd, &buffer) < 0)
-        {
-            swWarn("create buffer failed.");
-            break;
-        }
-        //for response
-        if (i % serv->reactor_num == reactor_id)
-        {
-            swSetNonBlock(pipe_fd);
-            reactor->add(reactor, pipe_fd, SW_FD_PIPE);
-            /**
-             * mapping reactor_id and worker pipe
-             */
-            serv->connection_list[pipe_fd].from_id = reactor_id;
+            pipe_fd = serv->workers[i].pipe_master;
+            //for request
+            swBuffer *buffer = swBuffer_new(sizeof(swEventData));
+            if (!buffer)
+            {
+                swWarn("create buffer failed.");
+                break;
+            }
+            if (swArray_store(thread->buffer_pipe, pipe_fd, &buffer) < 0)
+            {
+                swWarn("create buffer failed.");
+                break;
+            }
+            //for response
+            if (i % serv->reactor_num == reactor_id)
+            {
+                swSetNonBlock(pipe_fd);
+                reactor->add(reactor, pipe_fd, SW_FD_PIPE);
+                /**
+                 * mapping reactor_id and worker pipe
+                 */
+                serv->connection_list[pipe_fd].from_id = reactor_id;
+            }
         }
     }
-
 
     //main loop
     reactor->wait(reactor, NULL);

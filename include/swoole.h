@@ -190,6 +190,8 @@ enum swServer_mode
     SW_MODE_PROCESS       =  3,
     SW_MODE_SINGLE        =  4,
 };
+
+#define SW_MODE_PACKET		0x10 
 //-------------------------------------------------------------------------------
 enum swSocket_type
 {
@@ -318,20 +320,22 @@ typedef unsigned char uchar;
 typedef struct _swConnection
 {
     /**
-     * is active
-     * system fd must be 0. en: timerfd, signalfd, listen socket
-     */
-    uint8_t active;
-
-    /**
      * file descript
      */
     int fd;
     int type;
     int events;
 
+    /**
+     * is active
+     * system fd must be 0. en: timerfd, signalfd, listen socket
+     */
+    uint32_t active :1;
+
     uint32_t recv_wait :1;
     uint32_t send_wait :1;
+
+    uint32_t direct_send :1;
 
     uint32_t close_wait :1;
     uint32_t closed :1;
@@ -358,7 +362,7 @@ typedef struct _swConnection
     struct sockaddr_in addr;
 
     /**
-     * link any thing
+     * link any thing, for kernel, do not use with application.
      */
     void *object;
 
@@ -458,7 +462,7 @@ typedef struct _swEvent
     int fd;
     int16_t from_id;
     uint8_t type;
-    void *object;
+    swConnection *socket;
 } swEvent;
 
 typedef struct _swEventData
@@ -855,6 +859,8 @@ int swAccept(int server_socket, struct sockaddr_in *addr, int addr_len);
 void swoole_init(void);
 void swoole_clean(void);
 void swoole_update_time(void);
+double swoole_microtime(void);
+void swoole_rtrim(char *str, int len);
 
 int swSocket_listen(int type, char *host, int port, int backlog);
 int swSocket_create(int type);
@@ -936,7 +942,16 @@ struct swReactor_s
 	uint16_t flag; //flag
 
     uint32_t max_socket;
-    struct _swConnection *sockets;
+
+    /**
+     * for thread
+     */
+    swConnection *socket_list;
+
+    /**
+     * for process
+     */
+    swArray *socket_array;
 
     swReactor_handle handle[SW_MAX_FDTYPE];        //默认事件
     swReactor_handle write_handle[SW_MAX_FDTYPE];  //扩展事件1(一般为写事件)
@@ -1133,7 +1148,7 @@ static sw_inline int swReactor_events(int fdtype)
     return events;
 }
 
-int swReactor_auto(swReactor *reactor, int max_event);
+int swReactor_create(swReactor *reactor, int max_event);
 int swReactor_setHandle(swReactor *, int, swReactor_handle);
 int swReactor_add(swReactor *reactor, int fd, int type);
 swConnection* swReactor_get(swReactor *reactor, int fd);
@@ -1198,7 +1213,7 @@ enum swThread_type
 {
     SW_THREAD_MASTER = 1,
     SW_THREAD_REACTOR = 2,
-    SW_THREAD_WRITER = 3,
+    SW_THREAD_WORKER = 3,
     SW_THREAD_UDP = 4,
     SW_THREAD_UNIX_DGRAM = 5,
     SW_THREAD_HEARTBEAT = 6,
@@ -1212,6 +1227,9 @@ typedef struct _swThreadPool
     swThread *threads;
     swThreadParam *params;
 
+    void *ptr1;
+    void *ptr2;
+
 #ifdef SW_THREADPOOL_USE_CHANNEL
     swChannel *chan;
 #else
@@ -1220,8 +1238,10 @@ typedef struct _swThreadPool
 
     int thread_num;
     int shutdown;
-    int task_num;
+    sw_atomic_t task_num;
 
+    void (*onStart)(struct _swThreadPool *pool, int id);
+    void (*onStop)(struct _swThreadPool *pool, int id);
     int (*onTask)(struct _swThreadPool *pool, void *task, int task_len);
 
 } swThreadPool;

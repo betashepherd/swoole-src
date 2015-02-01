@@ -17,8 +17,6 @@
 #include "swoole.h"
 #include "array.h"
 
-static int swArray_extend(swArray *array);
-
 swArray *swArray_new(int page_size, size_t item_size, int flag)
 {
     swArray *array = sw_malloc(sizeof(swArray));
@@ -95,6 +93,25 @@ int swArray_store(swArray *array, uint32_t n, void *data)
     }
     memcpy(array->pages[page] + (swArray_offset(array, n) * array->item_size), data, array->item_size);
     return SW_OK;
+}
+
+void *swArray_alloc(swArray *array, uint32_t n)
+{
+    while (n >= array->item_size)
+    {
+        if (swArray_extend(array) < 0)
+        {
+            return NULL;
+        }
+    }
+
+    int page = swArray_page(array, n);
+    if (page >= array->page_num)
+    {
+        swWarn("fetch index[%d] out of array", n);
+        return NULL;
+    }
+    return array->pages[page] + (swArray_offset(array, n) * array->item_size);
 }
 
 int swArray_push(swArray *array, void *data)

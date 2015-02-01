@@ -4,7 +4,7 @@
 /**
  * 默认swArray->pages指针数组的长度为SW_ARRAY_PAGE_MAX,也就是最多可以管理(SW_ARRAY_PAGE_MAX*page_size)个元素
  */
-#define SW_ARRAY_PAGE_MAX      128
+#define SW_ARRAY_PAGE_MAX      1024
 
 typedef struct _swArray
 {
@@ -24,6 +24,8 @@ swArray *swArray_new(int page_size, size_t item_size, int flag);
 void swArray_free(swArray *array);
 void *swArray_fetch(swArray *array, uint32_t n);
 int swArray_store(swArray *array, uint32_t n, void *data);
+void *swArray_alloc(swArray *array, uint32_t n);
 int swArray_push(swArray *array, void *data);
+int swArray_extend(swArray *array);
 
 #endif /* _SW_ARRAY_H_ */

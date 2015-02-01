@@ -21,10 +21,6 @@
 #define SW_MAX_WORKER_GROUP        2
 #define SW_MAX_FILE_CONTENT        (64*1024*1024) //for swoole_file_get_contents
 
-#ifndef SW_USE_RINGBUFFER
-#define SW_USE_RINGBUFFER
-#endif
-
 #define SW_USE_EVENT_TIMER
 
 //#define SW_DEBUG_REMOTE_OPEN
@@ -95,8 +91,8 @@
 //#define SW_AIO_THREAD_USE_CHANNEL
 #define SW_AIO_MAX_EVENTS                128
 //#define SW_THREADPOOL_USE_CHANNEL
-#define SW_THREADPOOL_QUEUE_LEN    100
-#define SW_IP_MAX_LENGTH           32
+#define SW_THREADPOOL_QUEUE_LEN          10000
+#define SW_IP_MAX_LENGTH                 32
 
 #define SW_USE_WRITER_THREAD       0    //使用单独的发送线程
 

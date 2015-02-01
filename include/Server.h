@@ -111,6 +111,7 @@ typedef struct _swReactorThread
     swUdpFd *udp_addrs;
     swMemoryPool *buffer_input;
     swArray *buffer_pipe;
+    swLock lock;
     int c_udp_fd;
 } swReactorThread;
 
@@ -201,8 +202,7 @@ int swFactoryProcess_end(swFactory *factory, int fd);
 int swFactoryThread_create(swFactory *factory, int writer_num);
 int swFactoryThread_start(swFactory *factory);
 int swFactoryThread_shutdown(swFactory *factory);
-int swFactoryThread_dispatch(swFactory *factory, swDispatchData *buf);
-int swFactoryThread_finish(swFactory *factory, swSendData *data);
+
 
 //------------------------------------Server-------------------------------------------
 struct _swServer
@@ -226,6 +226,11 @@ struct _swServer
     uint16_t reactor_pipe_num;
 
     uint8_t factory_mode;
+
+    /**
+     * swoole packet mode
+     */
+    int packet_mode;
 
     /**
      * package dispatch mode
@@ -481,7 +486,7 @@ int swServer_free(swServer *serv);
 int swServer_shutdown(swServer *serv);
 
 int swServer_udp_send(swServer *serv, swSendData *resp);
-int swServer_tcp_send(swServer *serv, int fd, void *data, int length);
+int swServer_tcp_send(swServer *serv, int fd, void *data, uint32_t length);
 
 //UDP, UDP必然超过0x1000000
 //原因：IPv4的第4字节最小为1,而这里的conn_fd是网络字节序
@@ -592,9 +597,12 @@ static sw_inline uint32_t swServer_worker_schedule(swServer *serv, uint32_t sche
     else if (serv->dispatch_mode == SW_DISPATCH_UIDMOD)
     {
         swConnection *conn = swServer_connection_get(serv, schedule_key);
-        if(conn->uid) {
+        if (conn->uid)
+        {
             target_worker_id = conn->uid % serv->worker_num;
-        }else{
+        }
+        else
+        {
             target_worker_id = schedule_key % serv->worker_num;
         }
     }
@@ -613,7 +621,7 @@ static sw_inline uint32_t swServer_worker_schedule(swServer *serv, uint32_t sche
                 break;
             }
         }
-        swTrace("schedule=%d|round=%d\n", target_worker_id, *round);
+        //swWarn("schedule=%d|round=%d\n", target_worker_id, *round);
     }
     return target_worker_id;
 }

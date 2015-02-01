@@ -242,7 +242,7 @@ static int swServer_start_proxy(swServer *serv)
     int ret;
     swReactor *main_reactor = SwooleG.memory_pool->alloc(SwooleG.memory_pool, sizeof(swReactor));
 
-    ret = swReactor_auto(main_reactor, SW_REACTOR_MINEVENTS);
+    ret = swReactor_create(main_reactor, SW_REACTOR_MINEVENTS);
 	if (ret < 0)
 	{
 		swWarn("Reactor create failed");
@@ -420,7 +420,6 @@ int swServer_start(swServer *serv)
 	SwooleGS->now = SwooleStats->start_time = time(NULL);
 
 	//设置factory回调函数
-	serv->factory.ptr = serv;
 	serv->factory.onTask = serv->onReceive;
 
 	if (serv->have_udp_sock == 1 && serv->factory_mode != SW_MODE_PROCESS)
@@ -585,6 +584,8 @@ int swServer_create(swServer *serv)
     SwooleG.serv = serv;
     SwooleG.factory = &serv->factory;
 
+    serv->factory.ptr = serv;
+
     //单进程单线程模式
     if (serv->factory_mode == SW_MODE_SINGLE)
     {
@@ -723,7 +724,7 @@ swPipe * swServer_pipe_get(swServer *serv, int pipe_fd)
     return (swPipe *) serv->connection_list[pipe_fd].object;
 }
 
-int swServer_tcp_send(swServer *serv, int fd, void *data, int length)
+int swServer_tcp_send(swServer *serv, int fd, void *data, uint32_t length)
 {
 	swSendData _send;
 	swFactory *factory = &(serv->factory);
@@ -737,23 +738,23 @@ int swServer_tcp_send(swServer *serv, int fd, void *data, int length)
 		swWarn("More than the output buffer size[%d], please use the sendfile.", serv->buffer_output_size);
 		return SW_ERR;
 	}
-	else
-	{
-		_send.info.fd = fd;
-		_send.info.type = SW_EVENT_TCP;
-		_send.data = data;
+    else
+    {
+        _send.info.fd = fd;
+        _send.info.type = SW_EVENT_TCP;
+        _send.data = data;
 
-		if (length >= SW_BUFFER_SIZE)
-		{
-			_send.length = length;
-		}
-		else
-		{
-			_send.info.len = length;
-			_send.length = 0;
-		}
-		return factory->finish(factory, &_send);
-	}
+        if (length >= SW_IPC_MAX_SIZE - sizeof(swDataHead))
+        {
+            _send.length = length;
+        }
+        else
+        {
+            _send.info.len = length;
+            _send.length = 0;
+        }
+        return factory->finish(factory, &_send);
+    }
 #else
     char buffer[SW_BUFFER_SIZE];
     int trunk_num = (length / SW_BUFFER_SIZE) + 1;
@@ -847,14 +848,6 @@ int swServer_add_worker(swServer *serv, swWorker *worker)
     user_worker->worker = worker;
 
     LL_APPEND(serv->user_worker_list, user_worker);
-
-    /**
-     * store the pipe object
-     */
-    if (worker->pipe_object)
-    {
-        swServer_pipe_set(serv, worker->pipe_object);
-    }
 
     if (!serv->user_worker_map)
     {
@@ -1175,6 +1168,13 @@ swConnection* swServer_connection_new(swServer *serv, swDataHead *ev)
     connection->connect_time = SwooleGS->now;
     connection->last_time = SwooleGS->now;
     connection->active = 1;
+
+#ifdef SW_REACTOR_SYNC_SEND
+    if (serv->factory_mode != SW_MODE_THREAD)
+    {
+        connection->direct_send = 1;
+    }
+#endif
 
 	return connection;
 }

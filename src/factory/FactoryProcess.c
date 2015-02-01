@@ -221,13 +221,20 @@ static int swFactoryProcess_manager_start(swFactory *factory)
         }
 
         /**
-         * create user workers
+         * create user worker process
          */
         if (serv->user_worker_list)
         {
             swUserWorker_node *user_worker;
             LL_FOREACH(serv->user_worker_list, user_worker)
             {
+                /**
+                 * store the pipe object
+                 */
+                if (user_worker->worker->pipe_object)
+                {
+                    swServer_pipe_set(serv, user_worker->worker->pipe_object);
+                }
                 swManager_create_user_worker(serv, user_worker->worker);
             }
         }
@@ -239,13 +246,13 @@ static int swFactoryProcess_manager_start(swFactory *factory)
         ret = swFactoryProcess_manager_loop(factory);
         exit(ret);
         break;
-        //主进程
+
+        //master process
     default:
         SwooleGS->manager_pid = pid;
         break;
     case -1:
-        swError("fork() failed.")
-        ;
+        swError("fork() failed.");
         return SW_ERR;
     }
     return SW_OK;
@@ -710,6 +717,12 @@ int swFactoryProcess_finish(swFactory *factory, swSendData *resp)
      */
     if (resp->length > 0)
     {
+        if (worker->send_shm == NULL)
+        {
+            swWarn("send failed, data is too big.");
+            return SW_ERR;
+        }
+
         swPackage_response response;
 
         worker->lock.lock(&worker->lock);

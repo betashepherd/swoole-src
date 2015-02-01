@@ -40,7 +40,7 @@
 #include "Client.h"
 #include "async.h"
 
-#define PHP_SWOOLE_VERSION  "1.7.10-alpha"
+#define PHP_SWOOLE_VERSION  "1.7.10-beta"
 #define PHP_SWOOLE_CHECK_CALLBACK
 
 /**
@@ -247,8 +247,6 @@ extern zend_class_entry *swoole_http_server_class_entry_ptr;
 
 extern zval *php_sw_callback[PHP_SERVER_CALLBACK_NUM];
 
-extern HashTable php_sw_event_callback;
-extern HashTable php_sw_client_callback;
 extern HashTable php_sw_timer_callback;
 extern HashTable php_sw_long_connections;
 extern HashTable php_sw_aio_callback;
