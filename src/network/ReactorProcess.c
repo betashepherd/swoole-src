@@ -19,6 +19,8 @@
 
 static int swReactorProcess_loop(swProcessPool *pool, swWorker *worker);
 static int swReactorProcess_onPipeRead(swReactor *reactor, swEvent *event);
+static void swReactorProcess_timer_init(swServer *serv, swReactor *reactor);
+static void swReactorProcess_onTimer(swTimer *timer, swTimer_node *event);
 
 int swReactorProcess_create(swServer *serv)
 {
@@ -35,6 +37,16 @@ int swReactorProcess_create(swServer *serv)
         swSysError("calloc[2](%d) failed.", (int )(serv->max_connection * sizeof(swConnection)));
         return SW_ERR;
     }
+
+#ifdef SW_REACTOR_USE_SESSION
+    serv->session_list = sw_calloc(serv->max_connection, sizeof(swSession));
+    if (serv->session_list == NULL)
+    {
+        swSysError("calloc[2](%d) failed.", (int )(serv->max_connection * sizeof(swSession)));
+        return SW_ERR;
+    }
+#endif
+
     //create factry object
     if (swFactory_create(&(serv->factory)) < 0)
     {
@@ -105,7 +117,7 @@ int swReactorProcess_start(swServer *serv)
         key_t key = 0;
         if (SwooleG.task_ipc_mode == SW_IPC_MSGQUEUE)
         {
-            key = serv->message_queue_key + 2;
+            key = serv->message_queue_key;
         }
 
         if (swProcessPool_create(&SwooleGS->task_workers, SwooleG.task_worker_num, serv->task_max_request, key, 1) < 0)
@@ -114,21 +126,10 @@ int swReactorProcess_start(swServer *serv)
             return SW_ERR;
         }
 
-        int i;
-        swWorker *worker;
-        for (i = 0; i < SwooleG.task_worker_num; i++)
-        {
-            worker = swServer_get_worker(serv, serv->worker_num + i);
-            if (swWorker_create(worker) < 0)
-            {
-                return SW_ERR;
-            }
-        }
-
         swTaskWorker_init(&SwooleGS->task_workers);
         swProcessPool_start(&SwooleGS->task_workers);
 
-        //将taskworker也加入到wait中来
+        int i;
         for (i = 0; i < SwooleGS->task_workers.worker_num; i++)
         {
             swProcessPool_add_worker(&SwooleGS->event_workers, &SwooleGS->task_workers.workers[i]);
@@ -148,6 +149,7 @@ int swReactorProcess_start(swServer *serv)
     swProcessPool_wait(&SwooleGS->event_workers);
 
     swProcessPool_shutdown(&SwooleGS->event_workers);
+    sw_free(serv->session_list);
 
     return SW_OK;
 }
@@ -217,14 +219,13 @@ static int swReactorProcess_loop(swProcessPool *pool, swWorker *worker)
 
     reactor->close = swReactorThread_close;
 
-    reactor->onFinish = NULL;
-    reactor->onTimeout = NULL;
-
     //set event handler
     //connect
     reactor->setHandle(reactor, SW_FD_LISTEN, swServer_master_onAccept);
     //close
     reactor->setHandle(reactor, SW_FD_CLOSE, swReactorProcess_onClose);
+    //pipe
+    reactor->setHandle(reactor, SW_FD_PIPE | SW_EVENT_WRITE, swReactor_onWrite);
 
     if (serv->onPipeMessage)
     {
@@ -239,6 +240,14 @@ static int swReactorProcess_loop(swProcessPool *pool, swWorker *worker)
     if (serv->onWorkerStart)
     {
         serv->onWorkerStart(serv, worker->id);
+    }
+
+    /**
+     * for heartbeat check
+     */
+    if (serv->heartbeat_check_interval > 0)
+    {
+        swReactorProcess_timer_init(serv, reactor);
     }
 
     struct timeval timeo;
@@ -257,4 +266,48 @@ int swReactorProcess_onClose(swReactor *reactor, swEvent *event)
         serv->onClose(serv, event->fd, event->from_id);
     }
     return reactor->close(reactor, event->fd);
+}
+
+static void swReactorProcess_timer_init(swServer *serv, swReactor *reactor)
+{
+    SwooleG.timer.onTimer = swReactorProcess_onTimer;
+    int interval_ms = serv->heartbeat_check_interval * 1000;
+    swEventTimer_init();
+    reactor->timeout_msec = interval_ms;
+    SwooleG.timer.interval = interval_ms;
+    SwooleG.timer.add(&SwooleG.timer, interval_ms, 1, serv);
+}
+
+static void swReactorProcess_onTimer(swTimer *timer, swTimer_node *event)
+{
+    swServer *serv = SwooleG.serv;
+
+    if (event->data == serv)
+    {
+        swFactory *factory = &serv->factory;
+        swConnection *conn;
+
+        int fd;
+        int serv_max_fd;
+        int serv_min_fd;
+        int checktime;
+
+        serv_max_fd = swServer_get_maxfd(serv);
+        serv_min_fd = swServer_get_minfd(serv);
+
+        checktime = (int) time(NULL) - serv->heartbeat_idle_time;
+
+        for (fd = serv_min_fd; fd <= serv_max_fd; fd++)
+        {
+            conn = swServer_connection_get(serv, fd);
+            if (conn != NULL && 1 == conn->active && conn->last_time < checktime)
+            {
+                factory->end(&serv->factory, fd);
+            }
+        }
+    }
+    else
+    {
+        swServer_onTimer(timer, event);
+    }
 }

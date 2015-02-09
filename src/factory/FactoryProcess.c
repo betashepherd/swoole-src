@@ -151,6 +151,7 @@ static int swFactoryProcess_manager_start(swFactory *factory)
         {
             key = serv->message_queue_key + 2;
         }
+
         int task_num = SwooleG.task_worker_max > 0 ? SwooleG.task_worker_max : SwooleG.task_worker_num;
         //启动min个.此时的pool->worker_num相当于max
         if (swProcessPool_create(&SwooleGS->task_workers, task_num, serv->task_max_request, key, 1) < 0)
@@ -163,23 +164,19 @@ static int swFactoryProcess_manager_start(swFactory *factory)
         swProcessPool *pool = &SwooleGS->task_workers;
         swTaskWorker_init(pool);
 
-        int worker_id;
+        int i;
         swWorker *worker;
         for (i = 0; i < task_num; i++)
         {
-            worker_id = serv->worker_num + i;
-            worker = swServer_get_worker(serv, worker_id);
+            worker = &pool->workers[i];
             if (swWorker_create(worker) < 0)
             {
                 return SW_ERR;
             }
             if (SwooleG.task_ipc_mode == SW_IPC_UNSOCK)
             {
-                swServer_pipe_set(serv, worker->pipe_object);
+                swServer_pipe_set(SwooleG.serv, worker->pipe_object);
             }
-            pool->workers[i].id = pool->start_id + i;
-            pool->workers[i].pool = pool;
-            pool->workers[i].type = pool->type;
         }
     }
 
@@ -299,7 +296,7 @@ static void swManager_signal_handle(int sig)
         break;
     case SIGALRM:
         worker = &(pool->workers[pool->run_worker_num]);
-        if (worker->del == 1 && worker->tasking_num == 0)
+        if (worker->deleted == 1 && worker->tasking_num == 0)
         {
             ret = kill(worker->pid, SIGTERM);
             if (ret < 0)
@@ -342,7 +339,7 @@ static void swManager_signal_handle(int sig)
             {
                 pool->run_worker_num--;
                 worker = &(pool->workers[pool->run_worker_num]);
-                worker->del = 1;
+                worker->deleted = 1;
                 SwooleG.task_recycle_num = 0;
             }
         }
@@ -495,9 +492,9 @@ static int swFactoryProcess_manager_loop(swFactory *factory)
 
                 if (exit_worker != NULL)
                 {
-                    if (exit_worker->del == 1)  //主动回收不重启
+                    if (exit_worker->deleted == 1)  //主动回收不重启
                     {
-                        exit_worker->del = 0;
+                        exit_worker->deleted = 0;
                     }
                     else
                     {
@@ -640,11 +637,15 @@ int swFactoryProcess_end(swFactory *factory, int fd)
     _send.info.len = 0;
     _send.info.type = SW_EVENT_CLOSE;
 
-    swConnection *conn = swServer_connection_get(serv, _send.info.fd);
+    swConnection *conn = swWorker_get_connection(serv, fd);
     if (conn == NULL || conn->active == 0)
     {
         //swWarn("can not close. Connection[%d] not found.", _send.info.fd);
         return SW_ERR;
+    }
+    else if (conn->close_force)
+    {
+        goto do_close;
     }
     else if (conn->closing)
     {
@@ -657,10 +658,14 @@ int swFactoryProcess_end(swFactory *factory, int fd)
     }
     else
     {
+        conn->closing = 1;
         if (serv->onClose != NULL)
         {
             serv->onClose(serv, fd, conn->from_id);
         }
+        conn->closing = 0;
+
+        do_close:
         conn->closed = 1;
         return swFactoryProcess_finish(factory, &_send);
     }
@@ -684,6 +689,7 @@ int swFactoryProcess_finish(swFactory *factory, swSendData *resp)
 
         addr_un.sun_family = AF_UNIX;
         memcpy(addr_un.sun_path, resp->sun_path, resp->sun_path_len);
+        addr_un.sun_path[resp->sun_path_len] = 0;
         len = sizeof(addr_un);
         ret = swSocket_sendto_blocking(from_sock, resp->data, resp->info.len, 0, (struct sockaddr *) &addr_un, len);
         goto finish;
@@ -694,9 +700,7 @@ int swFactoryProcess_finish(swFactory *factory, swSendData *resp)
         return swServer_udp_send(serv, resp);
     }
 
-    swEventData ev_data;
-
-    swConnection *conn = swServer_connection_get(serv, fd);
+    swConnection *conn = swWorker_get_connection(serv, fd);
     if (conn == NULL || conn->active == 0)
     {
         swWarn("send failed, because connection[%d] has been closed.", fd);
@@ -708,6 +712,7 @@ int swFactoryProcess_finish(swFactory *factory, swSendData *resp)
         return SW_ERR;
     }
 
+    swEventData ev_data;
     ev_data.info.fd = fd;
     ev_data.info.type = resp->info.type;
     swWorker *worker = swServer_get_worker(serv, SwooleWG.id);
@@ -797,8 +802,7 @@ int swFactoryProcess_dispatch(swFactory *factory, swDispatchData *task)
     if (task->target_worker_id < 0)
     {
         //udp use remote port
-        if (task->data.info.type == SW_EVENT_UDP || task->data.info.type == SW_EVENT_UDP6
-                || task->data.info.type == SW_EVENT_UNIX_DGRAM)
+        if (swEventData_is_dgram(task->data.info.type))
         {
             if (serv->dispatch_mode == SW_DISPATCH_IPMOD)
             {
@@ -836,6 +840,25 @@ int swFactoryProcess_dispatch(swFactory *factory, swDispatchData *task)
     else
     {
         target_worker_id = task->target_worker_id;
+    }
+
+    if (swEventData_is_stream(task->data.info.type))
+    {
+        swConnection *conn = swServer_connection_get(serv, task->data.info.fd);
+        if (conn == NULL || conn->active == 0)
+        {
+            swWarn("connection#%d is not active.", task->data.info.fd);
+            return SW_ERR;
+        }
+        if (conn->closed)
+        {
+            swWarn("connection#%d is closed by server.", task->data.info.fd);
+            return SW_OK;
+        }
+
+#ifdef SW_REACTOR_USE_SESSION
+        task->data.info.fd = conn->session_id;
+#endif
     }
 
     return swReactorThread_send2worker((void *) &(task->data), send_len, target_worker_id);

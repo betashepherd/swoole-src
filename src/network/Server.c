@@ -41,8 +41,10 @@ static int swServer_start_check(swServer *serv);
 static void swServer_signal_hanlder(int sig);
 static int swServer_start_proxy(swServer *serv);
 
-static void swServer_heartbeat_start(swServer *serv);
-static void swServer_heartbeat_check(swThreadParam *heartbeat_param);
+static void swHeartbeatThread_start(swServer *serv);
+static void swHeartbeatThread_loop(swThreadParam *param);
+
+static swConnection* swServer_connection_new(swServer *serv, int fd, int from_fd, int reactor_id);
 
 swServerG SwooleG;
 swServerGS *SwooleGS;
@@ -55,44 +57,44 @@ char sw_error[SW_ERROR_MSG_SIZE];
 
 int swServer_master_onAccept(swReactor *reactor, swEvent *event)
 {
-	swServer *serv = reactor->ptr;
-	swDataHead connEv;
-	struct sockaddr_in client_addr;
-	socklen_t client_addrlen = sizeof(client_addr);
-	int new_fd, ret, reactor_id = 0, i;
+    swServer *serv = reactor->ptr;
+    swReactor *sub_reactor;
+    struct sockaddr_in client_addr;
+    socklen_t client_addrlen = sizeof(client_addr);
+    int new_fd, ret, reactor_id = 0, i;
 
-	//SW_ACCEPT_AGAIN
-	for (i = 0; i < SW_ACCEPT_MAX_COUNT; i++)
-	{
-		//accept得到连接套接字
+    //SW_ACCEPT_AGAIN
+    for (i = 0; i < SW_ACCEPT_MAX_COUNT; i++)
+    {
+        //accept得到连接套接字
 #ifdef SW_USE_ACCEPT4
-	    new_fd = accept4(event->fd, (struct sockaddr *)&client_addr, &client_addrlen, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        new_fd = accept4(event->fd, (struct sockaddr *)&client_addr, &client_addrlen, SOCK_NONBLOCK | SOCK_CLOEXEC);
 #else
-		new_fd = accept(event->fd,  (struct sockaddr *)&client_addr, &client_addrlen);
+        new_fd = accept(event->fd, (struct sockaddr *) &client_addr, &client_addrlen);
 #endif
-		if (new_fd < 0 )
-		{
-			switch(errno)
-			{
-			case EAGAIN:
-				return SW_OK;
-			case EINTR:
-				continue;
-			default:
-				swWarn("accept() failed. Error: %s[%d]", strerror(errno), errno);
-				return SW_OK;
-			}
-		}
+        if (new_fd < 0)
+        {
+            switch (errno)
+            {
+            case EAGAIN:
+                return SW_OK;
+            case EINTR:
+                continue;
+            default:
+                swWarn("accept() failed. Error: %s[%d]", strerror(errno), errno);
+                return SW_OK;
+            }
+        }
 
-		swTrace("[Master] Accept new connection. maxfd=%d|reactor_id=%d|conn=%d", swServer_get_maxfd(serv), reactor->id, new_fd);
+        swTrace("[Master] Accept new connection. maxfd=%d|reactor_id=%d|conn=%d", swServer_get_maxfd(serv), reactor->id, new_fd);
 
-		//too many connection
-		if (new_fd >= serv->max_connection)
-		{
-			swWarn("Too many connections [now: %d].", new_fd);
-			close(new_fd);
-			return SW_OK;
-		}
+        //too many connection
+        if (new_fd >= serv->max_connection)
+        {
+            swWarn("Too many connections [now: %d].", new_fd);
+            close(new_fd);
+            return SW_OK;
+        }
 
 #if SW_REACTOR_SCHEDULE == 1
 		//轮询分配
@@ -109,13 +111,23 @@ int swServer_master_onAccept(swReactor *reactor, swEvent *event)
 		}
 #endif
 
-		connEv.type = SW_EVENT_CONNECT;
-		connEv.from_id = reactor_id;
-		connEv.fd = new_fd;
-		connEv.from_fd = event->fd;
-
 		//add to connection_list
-		swConnection *conn = swServer_connection_new(serv, &connEv);
+        swConnection *conn = swServer_connection_new(serv, new_fd, event->fd, reactor_id);
+        memcpy(&conn->addr, &client_addr, sizeof(client_addr));
+        sub_reactor = &serv->reactor_threads[reactor_id].reactor;
+
+#ifdef SW_REACTOR_USE_SESSION
+        uint32_t session_id = (serv->session_round++) % SW_MAX_SOCKET_ID;
+        if (session_id == 0)
+        {
+            session_id = 1;
+            serv->session_round++;
+        }
+        conn->session_id = session_id;
+        swSession *session = &serv->session_list[session_id % serv->max_connection];
+        session->fd = new_fd;
+        session->id = session_id;
+#endif
 
 #ifdef SW_USE_OPENSSL
 		if (serv->open_ssl)
@@ -135,76 +147,77 @@ int swServer_master_onAccept(swReactor *reactor, swEvent *event)
 			}
 		}
 #endif
-		memcpy(&conn->addr, &client_addr, sizeof(client_addr));
-		/*
-		 * [!!!] new_connection function must before reactor->add
-		 */
-		ret = serv->reactor_threads[reactor_id].reactor.add(&(serv->reactor_threads[reactor_id].reactor), new_fd,
-				SW_FD_TCP | SW_EVENT_READ);
-		if (ret < 0)
-		{
-			close(new_fd);
-			return SW_OK;
-		}
+
+        /*
+         * [!!!] new_connection function must before reactor->add
+         */
+        if (serv->factory_mode == SW_MODE_PROCESS && serv->onConnect)
+        {
+            conn->connect_notify = 1;
+            ret = sub_reactor->add(sub_reactor, new_fd, SW_FD_TCP | SW_EVENT_WRITE);
+        }
         else
         {
-            if (serv->onConnect != NULL)
-            {
-                serv->factory.notify(&serv->factory, &connEv);
-            }
+            ret = sub_reactor->add(sub_reactor, new_fd, SW_FD_TCP | SW_EVENT_READ);
+        }
+
+        if (ret < 0)
+        {
+            close(new_fd);
+            return SW_OK;
         }
 #ifdef SW_ACCEPT_AGAIN
         continue;
 #else
         break;
 #endif
-	}
-	return SW_OK;
+    }
+    return SW_OK;
 }
 
-void swServer_onTimer(swTimer *timer, int interval)
+void swServer_onTimer(swTimer *timer, swTimer_node *event)
 {
-	swServer *serv = SwooleG.serv;
-	serv->onTimer(serv, interval);
+    swServer *serv = SwooleG.serv;
+    serv->onTimer(serv, event->interval);
 }
 
 static int swServer_start_check(swServer *serv)
 {
-	if (serv->onReceive == NULL)
-	{
-		swWarn("onReceive is null");
-		return SW_ERR;
-	}
-	//Timer
-	if (SwooleG.timer.interval > 0 && serv->onTimer == NULL)
-	{
-		swWarn("onTimer is null");
-		return SW_ERR;
-	}
-	//AsyncTask
-	if (SwooleG.task_worker_num > 0)
-	{
-		if (serv->onTask == NULL)
-		{
-			swWarn("onTask is null");
-			return SW_ERR;
-		}
-		if (serv->onFinish == NULL)
-		{
-			swWarn("onFinish is null");
-			return SW_ERR;
-		}
-	}
-	//check thread num
-	if (serv->reactor_num > SW_CPU_NUM * SW_MAX_THREAD_NCPU)
-	{
-		serv->reactor_num = SW_CPU_NUM * SW_MAX_THREAD_NCPU;
-	}
-	if (serv->worker_num > SW_CPU_NUM * SW_MAX_WORKER_NCPU)
-	{
-		swWarn("serv->worker_num > %d, Too many processes, the system will be slow", SW_CPU_NUM * SW_MAX_WORKER_NCPU);
-		serv->worker_num = SW_CPU_NUM * SW_MAX_WORKER_NCPU;
-	}
+    if (serv->onReceive == NULL)
+    {
+        swWarn("onReceive is null");
+        return SW_ERR;
+    }
+    //Timer
+    if (SwooleG.timer.interval > 0 && serv->onTimer == NULL)
+    {
+        swWarn("onTimer is null");
+        return SW_ERR;
+    }
+    //AsyncTask
+    if (SwooleG.task_worker_num > 0)
+    {
+        if (serv->onTask == NULL)
+        {
+            swWarn("onTask is null");
+            return SW_ERR;
+        }
+        if (serv->onFinish == NULL)
+        {
+            swWarn("onFinish is null");
+            return SW_ERR;
+        }
+    }
+    //check thread num
+    if (serv->reactor_num > SW_CPU_NUM * SW_MAX_THREAD_NCPU)
+    {
+        serv->reactor_num = SW_CPU_NUM * SW_MAX_THREAD_NCPU;
+    }
+    if (serv->worker_num > SW_CPU_NUM * SW_MAX_WORKER_NCPU)
+    {
+        swWarn("serv->worker_num > %d, Too many processes, the system will be slow", SW_CPU_NUM * SW_MAX_WORKER_NCPU);
+        serv->worker_num = SW_CPU_NUM * SW_MAX_WORKER_NCPU;
+    }
     if (serv->worker_num < serv->reactor_num)
     {
         serv->reactor_num = serv->worker_num;
@@ -221,16 +234,16 @@ static int swServer_start_check(swServer *serv)
     }
 
 #ifdef SW_USE_OPENSSL
-	if (serv->open_ssl)
-	{
-		if (serv->ssl_cert_file == NULL || serv->ssl_key_file == NULL)
-		{
-			swWarn("SSL error, require ssl_cert_file and ssl_key_file.");
-			return SW_ERR;
-		}
-	}
+    if (serv->open_ssl)
+    {
+        if (serv->ssl_cert_file == NULL || serv->ssl_key_file == NULL)
+        {
+            swWarn("SSL error, require ssl_cert_file and ssl_key_file.");
+            return SW_ERR;
+        }
+    }
 #endif
-	return SW_OK;
+    return SW_OK;
 }
 
 /**
@@ -249,6 +262,9 @@ static int swServer_start_proxy(swServer *serv)
 		return SW_ERR;
 	}
 
+    main_reactor->thread = 1;
+    main_reactor->socket_list = serv->connection_list;
+
 #ifdef HAVE_SIGNALFD
     if (SwooleG.use_signalfd)
     {
@@ -265,6 +281,15 @@ static int swServer_start_proxy(swServer *serv)
 		swWarn("ReactorThread start failed");
 		return SW_ERR;
 	}
+
+    /**
+     * heartbeat thread
+     */
+    if (serv->heartbeat_check_interval >= 1 && serv->heartbeat_check_interval <= serv->heartbeat_idle_time)
+    {
+        swTrace("hb timer start, time: %d live time:%d", serv->heartbeat_check_interval, serv->heartbeat_idle_time);
+        swHeartbeatThread_start(serv);
+    }
 
 	/**
      * master thread loop
@@ -299,11 +324,14 @@ int swServer_worker_init(swServer *serv, swWorker *worker)
     {
         cpu_set_t cpu_set;
         CPU_ZERO(&cpu_set);
-         if(serv->cpu_affinity_available_num){
+        if (serv->cpu_affinity_available_num)
+        {
             CPU_SET(serv->cpu_affinity_available[worker->id % serv->cpu_affinity_available_num], &cpu_set);
-         }else{
+        }
+        else
+        {
             CPU_SET(worker->id %SW_CPU_NUM, &cpu_set);
-         }
+        }
         if (sched_setaffinity(getpid(), sizeof(cpu_set), &cpu_set) < 0)
         {
             swSysError("sched_setaffinity() failed.");
@@ -490,13 +518,6 @@ int swServer_start(swServer *serv)
     //标识为主进程
     SwooleG.process_type = SW_PROCESS_MASTER;
 
-    //启动心跳检测
-    if (serv->heartbeat_check_interval >= 1 && serv->heartbeat_check_interval <= serv->heartbeat_idle_time)
-    {
-        swTrace("hb timer start, time: %d live time:%d", serv->heartbeat_check_interval, serv->heartbeat_idle_time);
-        swServer_heartbeat_start(serv);
-    }
-
     if (serv->factory_mode == SW_MODE_SINGLE)
     {
         ret = swReactorProcess_start(serv);
@@ -520,49 +541,50 @@ int swServer_start(swServer *serv)
  */
 void swServer_init(swServer *serv)
 {
-	swoole_init();
-	bzero(serv, sizeof(swServer));
+    swoole_init();
+    bzero(serv, sizeof(swServer));
 
-	serv->backlog = SW_BACKLOG;
-	serv->factory_mode = SW_MODE_BASE;
-	serv->reactor_num = SW_REACTOR_NUM;
-	serv->reactor_ringbuffer_size = SW_REACTOR_RINGBUFFER_SIZE;
+    serv->backlog = SW_BACKLOG;
+    serv->factory_mode = SW_MODE_BASE;
 
-	serv->dispatch_mode = SW_DISPATCH_FDMOD;
-	serv->ringbuffer_size = SW_QUEUE_SIZE;
+    serv->reactor_num = SW_REACTOR_NUM > SW_REACTOR_MAX_THREAD ? SW_REACTOR_MAX_THREAD : SW_REACTOR_NUM;
+    serv->reactor_ringbuffer_size = SW_REACTOR_RINGBUFFER_SIZE;
 
-	serv->timeout_sec = SW_REACTOR_TIMEO_SEC;
-	serv->timeout_usec = SW_REACTOR_TIMEO_USEC; //300ms;
+    serv->dispatch_mode = SW_DISPATCH_FDMOD;
+    serv->ringbuffer_size = SW_QUEUE_SIZE;
 
-	serv->worker_num = SW_CPU_NUM;
-	serv->max_connection = SwooleG.max_sockets;
+    serv->timeout_sec = SW_REACTOR_TIMEO_SEC;
+    serv->timeout_usec = SW_REACTOR_TIMEO_USEC;  //300ms;
 
-	serv->max_request = 0;
-	serv->task_max_request = SW_MAX_REQUEST;
+    serv->worker_num = SW_CPU_NUM;
+    serv->max_connection = SwooleG.max_sockets;
 
-	serv->open_tcp_nopush = 1;
+    serv->max_request = 0;
+    serv->task_max_request = SW_MAX_REQUEST;
 
-	//tcp keepalive
-	serv->tcp_keepcount = SW_TCP_KEEPCOUNT;
-	serv->tcp_keepinterval = SW_TCP_KEEPINTERVAL;
-	serv->tcp_keepidle = SW_TCP_KEEPIDLE;
+    serv->open_tcp_nopush = 1;
 
-	//heartbeat check
-	serv->heartbeat_idle_time = SW_HEARTBEAT_IDLE;
-	serv->heartbeat_check_interval = SW_HEARTBEAT_CHECK;
+    //tcp keepalive
+    serv->tcp_keepcount = SW_TCP_KEEPCOUNT;
+    serv->tcp_keepinterval = SW_TCP_KEEPINTERVAL;
+    serv->tcp_keepidle = SW_TCP_KEEPIDLE;
 
-	char eof[] = SW_DATA_EOF;
-	serv->package_eof_len = sizeof(SW_DATA_EOF) - 1;
-	serv->package_length_type = 'N';
-	serv->package_length_size = 4;
-	serv->package_body_offset = 0;
+    //heartbeat check
+    serv->heartbeat_idle_time = SW_HEARTBEAT_IDLE;
+    serv->heartbeat_check_interval = SW_HEARTBEAT_CHECK;
 
-	serv->package_max_length = SW_BUFFER_INPUT_SIZE;
+    char eof[] = SW_DATA_EOF;
+    serv->package_eof_len = sizeof(SW_DATA_EOF) - 1;
+    serv->package_length_type = 'N';
+    serv->package_length_size = 4;
+    serv->package_body_offset = 0;
 
-	serv->buffer_input_size = SW_BUFFER_INPUT_SIZE;
-	serv->buffer_output_size = SW_BUFFER_OUTPUT_SIZE;
+    serv->package_max_length = SW_BUFFER_INPUT_SIZE;
 
-	memcpy(serv->package_eof, eof, serv->package_eof_len);
+    serv->buffer_input_size = SW_BUFFER_INPUT_SIZE;
+    serv->buffer_output_size = SW_BUFFER_OUTPUT_SIZE;
+
+    memcpy(serv->package_eof, eof, serv->package_eof_len);
 }
 
 int swServer_create(swServer *serv)
@@ -661,6 +683,7 @@ int swServer_free(swServer *serv)
     {
         sw_shm_free(serv->connection_list);
     }
+
     //close log file
     if (serv->log_file[0] != 0)
     {
@@ -1060,31 +1083,34 @@ static void swServer_signal_hanlder(int sig)
     }
 }
 
-static void swServer_heartbeat_start(swServer *serv)
+static void swHeartbeatThread_start(swServer *serv)
 {
-	swThreadParam *heartbeat_param;
-	pthread_t heartbeat_pidt;
-	heartbeat_param = SwooleG.memory_pool->alloc(SwooleG.memory_pool, sizeof(swThreadParam));
-	if (heartbeat_param == NULL)
-	{
-		swError("heartbeat_param malloc fail\n");
-		return;
-	}
-	heartbeat_param->object = serv;
-	heartbeat_param->pti = 0;
-	if (pthread_create(&heartbeat_pidt, NULL, (void * (*)(void *)) swServer_heartbeat_check, (void *) heartbeat_param) < 0)
-	{
-		swWarn("pthread_create[hbcheck] fail");
-	}
-	SwooleG.heartbeat_pidt = heartbeat_pidt;
-	pthread_detach(SwooleG.heartbeat_pidt);
+    swThreadParam *param;
+    pthread_t thread_id;
+    param = SwooleG.memory_pool->alloc(SwooleG.memory_pool, sizeof(swThreadParam));
+    if (param == NULL)
+    {
+        swError("heartbeat_param malloc fail\n");
+        return;
+    }
+
+    param->object = serv;
+    param->pti = 0;
+
+    if (pthread_create(&thread_id, NULL, (void * (*)(void *)) swHeartbeatThread_loop, (void *) param) < 0)
+    {
+        swWarn("pthread_create[hbcheck] fail");
+    }
+    SwooleG.heartbeat_pidt = thread_id;
 }
 
-static void swServer_heartbeat_check(swThreadParam *heartbeat_param)
+static void swHeartbeatThread_loop(swThreadParam *param)
 {
+    swSignal_none();
+
+    swServer *serv = param->object;
     swDataHead notify_ev;
-    swServer *serv;
-    swFactory *factory;
+    swFactory *factory = &serv->factory;
     swConnection *conn;
 
     int fd;
@@ -1095,13 +1121,8 @@ static void swServer_heartbeat_check(swThreadParam *heartbeat_param)
     bzero(&notify_ev, sizeof(notify_ev));
     notify_ev.type = SW_EVENT_CLOSE;
 
-    swSignal_none();
-
     while (SwooleG.running)
     {
-        serv = heartbeat_param->object;
-        factory = &serv->factory;
-
         serv_max_fd = swServer_get_maxfd(serv);
         serv_min_fd = swServer_get_minfd(serv);
 
@@ -1112,24 +1133,26 @@ static void swServer_heartbeat_check(swThreadParam *heartbeat_param)
         {
             swTrace("check fd=%d", fd);
             conn = swServer_connection_get(serv, fd);
+
             if (conn != NULL && 1 == conn->active && conn->last_time < checktime)
             {
                 notify_ev.fd = fd;
                 notify_ev.from_id = conn->from_id;
+                conn->close_force = 1;
                 factory->notify(&serv->factory, &notify_ev);
             }
         }
         sleep(serv->heartbeat_check_interval);
     }
+
 	pthread_exit(0);
 }
 
 /**
  * new connection
  */
-swConnection* swServer_connection_new(swServer *serv, swDataHead *ev)
+static swConnection* swServer_connection_new(swServer *serv, int fd, int from_fd, int reactor_id)
 {
-    int fd = ev->fd;
     swConnection* connection = NULL;
 
     SwooleStats->accept_count++;
@@ -1163,8 +1186,8 @@ swConnection* swServer_connection_new(swServer *serv, swDataHead *ev)
 #endif
 
     connection->fd = fd;
-    connection->from_id = ev->from_id;
-    connection->from_fd = ev->from_fd;
+    connection->from_id = reactor_id;
+    connection->from_fd = from_fd;
     connection->connect_time = SwooleGS->now;
     connection->last_time = SwooleGS->now;
     connection->active = 1;
@@ -1178,3 +1201,4 @@ swConnection* swServer_connection_new(swServer *serv, swDataHead *ev)
 
 	return connection;
 }
+

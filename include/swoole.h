@@ -323,6 +323,12 @@ typedef struct _swConnection
      * file descript
      */
     int fd;
+
+    /**
+     * session id
+     */
+    uint32_t session_id;
+
     int type;
     int events;
 
@@ -332,6 +338,8 @@ typedef struct _swConnection
      */
     uint32_t active :1;
 
+    uint32_t connect_notify :1;
+
     uint32_t recv_wait :1;
     uint32_t send_wait :1;
 
@@ -340,11 +348,15 @@ typedef struct _swConnection
     uint32_t close_wait :1;
     uint32_t closed :1;
     uint32_t closing :1;
+    uint32_t close_force :1;
+
     uint32_t removed :1;
     uint32_t overflow :1;
 
     uint32_t tcp_nopush :1;
     uint32_t tcp_nodelay :1;
+
+    uint32_t http_buffered :1;
 
     /**
      * ReactorThread id
@@ -402,6 +414,12 @@ typedef struct _swConnection
 #endif
 
 } swConnection;
+
+typedef struct
+{
+    uint32_t id;
+    int fd;
+} swSession;
 
 typedef struct
 {
@@ -838,6 +856,7 @@ int swoole_sync_readfile(int fd, void *buf, int len);
 int swoole_system_random(int min, int max);
 swString* swoole_file_get_contents(char *filename);
 void swoole_open_remote_debug(void);
+int swoole_strnpos(char *haystack, char *needle, uint32_t length);
 
 void swoole_ioctl_set_block(int sock, int nonblock);
 void swoole_fcntl_set_block(int sock, int nonblock);
@@ -1001,10 +1020,11 @@ struct _swWorker
 	/**
 	 * worker status, IDLE or BUSY
 	 */
-	uint8_t status;
-	uint8_t type;
+    uint8_t status;
+    uint8_t type;
     uint8_t ipc_mode;
-    uint8_t del;
+
+    uint8_t deleted;
 
     /**
      * tasking num
@@ -1155,6 +1175,7 @@ swConnection* swReactor_get(swReactor *reactor, int fd);
 int swReactor_del(swReactor *reactor, int fd);
 int swReactor_onWrite(swReactor *reactor, swEvent *ev);
 int swReactor_close(swReactor *reactor, int fd);
+int swReactor_write(swReactor *reactor, int fd, void *buf, int n);
 
 swReactor_handle swReactor_getHandle(swReactor *reactor, int event_type, int fdtype);
 int swReactorEpoll_create(swReactor *reactor, int max_event_num);
@@ -1169,6 +1190,7 @@ int swProcessPool_start(swProcessPool *pool);
 void swProcessPool_shutdown(swProcessPool *pool);
 pid_t swProcessPool_spawn(swWorker *worker);
 int swProcessPool_dispatch(swProcessPool *pool, swEventData *data, int *worker_id);
+int swProcessPool_dispatch_blocking(swProcessPool *pool, swEventData *data, int *dst_worker_id);
 int swProcessPool_add_worker(swProcessPool *pool, swWorker *worker);
 
 static sw_inline swWorker* swProcessPool_get_worker(swProcessPool *pool, int worker_id)
@@ -1259,20 +1281,15 @@ int swThreadPool_run(swThreadPool *pool);
 int swThreadPool_free(swThreadPool *pool);
 
 //--------------------------------timer------------------------------
-typedef struct _swTimer_interval_node
-{
-    struct _swTimerList_node *next, *prev;
-    struct timeval lasttime;
-    uint32_t interval;
-} swTimer_interval_node;
-
 typedef struct _swTimer_node
 {
     struct _swTimer_node *next, *prev;
+    struct timeval lasttime;
     void *data;
     uint32_t exec_msec;
     uint32_t interval;
     uint32_t id;
+    uint8_t remove;
 } swTimer_node;
 
 typedef struct _swTimer
@@ -1290,13 +1307,13 @@ typedef struct _swTimer
 	/*-----------------for EventTimer-------------------*/
 	struct timeval basetime;
 	/*--------------------------------------------------*/
-	int (*add)(struct _swTimer *timer, int _msec, int _interval, void *data);
-	int (*del)(struct _swTimer *timer, int _interval_ms, int id);
+    int (*add)(struct _swTimer *timer, int _msec, int _interval, void *data);
+    void* (*del)(struct _swTimer *timer, int _interval_ms, int id);
 	int (*select)(struct _swTimer *timer);
 	void (*free)(struct _swTimer *timer);
 	/*-----------------event callback-------------------*/
-	void (*onTimer)(struct _swTimer *timer, int interval_msec);
-	void (*onTimeout)(struct _swTimer *timer, void *data);
+	void (*onTimer)(struct _swTimer *timer, swTimer_node *event);
+	void (*onTimeout)(struct _swTimer *timer, swTimer_node *event);
 } swTimer;
 
 int swTimer_init(int interval_ms, int no_pipe);
@@ -1305,7 +1322,7 @@ void swTimer_signal_handler(int sig);
 int swTimer_event_handler(swReactor *reactor, swEvent *event);
 void swTimer_node_insert(swTimer_node **root, swTimer_node *new_node);
 void swTimer_node_print(swTimer_node **root);
-int swTimer_node_delete(swTimer_node **root, int interval_msec, int id);
+swTimer_node* swTimer_node_find(swTimer_node **root, int interval_msec, int id);
 void swTimer_node_destory(swTimer_node **root);
 
 //--------------------------------------------------------------

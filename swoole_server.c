@@ -867,14 +867,10 @@ void php_swoole_onClose(swServer *serv, int fd, int from_id)
     args[1] = &zfd;
     args[2] = &zfrom_id;
 
-    swConnection *conn = swServer_connection_get(serv, fd);
-    conn->closing = 1;
-
     if (call_user_function_ex(EG(function_table), NULL, php_sw_callback[SW_SERVER_CB_onClose], &retval, 3, args, 0, NULL TSRMLS_CC) == FAILURE)
     {
         php_error_docref(NULL TSRMLS_CC, E_WARNING, "onClose handler error");
     }
-
     if (EG(exception))
     {
         zend_exception_error(EG(exception), E_ERROR TSRMLS_CC);
@@ -1726,9 +1722,15 @@ PHP_FUNCTION(swoole_server_send)
         //unix dgram
         if (!is_numeric_string(Z_STRVAL_P(zfd), Z_STRLEN_P(zfd), &_fd, NULL, 0))
         {
+            _send.info.from_fd = (from_id > 0) ? from_id : php_swoole_unix_dgram_fd;
+            if (_send.info.from_fd == 0)
+            {
+                php_error_docref(NULL TSRMLS_CC, E_WARNING, "no unix socket listener.");
+                RETURN_FALSE;
+            }
+
             _send.info.fd = (int) _fd;
             _send.info.type = SW_EVENT_UNIX_DGRAM;
-            _send.info.from_fd = (from_id > 0) ? from_id : php_swoole_unix_dgram_fd;
             _send.sun_path = Z_STRVAL_P(zfd);
             _send.sun_path_len = Z_STRLEN_P(zfd);
             _send.info.len = send_len;
@@ -1744,7 +1746,7 @@ PHP_FUNCTION(swoole_server_send)
     uint32_t fd = (uint32_t) _fd;
 
     //UDP
-    if (swSocket_isUDP(fd))
+    if (swServer_is_udp(fd))
     {
         if (from_id == -1)
         {
@@ -1880,7 +1882,7 @@ PHP_FUNCTION(swoole_server_sendfile)
     }
 
     //check fd
-    if (conn_fd <= 0)
+    if (conn_fd <= 0 || conn_fd > SW_MAX_SOCKET_ID)
     {
         php_error_docref(NULL TSRMLS_CC, E_WARNING, "invalid fd[%ld] error.", conn_fd);
         RETURN_FALSE;
@@ -2129,7 +2131,7 @@ PHP_FUNCTION(swoole_server_gettimer)
         RETURN_FALSE;
     }
 
-    swTimer_interval_node *timer_node;
+    swTimer_node *timer_node;
     uint64_t key;
     array_init(return_value);
 
@@ -2139,6 +2141,10 @@ PHP_FUNCTION(swoole_server_gettimer)
         if (timer_node == NULL)
         {
             break;
+        }
+        if (timer_node->interval == 0)
+        {
+            continue;
         }
         add_next_index_long(return_value, key);
 
@@ -2204,7 +2210,7 @@ PHP_FUNCTION(swoole_server_addtimer)
 PHP_FUNCTION(swoole_timer_after)
 {
     long interval;
-    swTimer_callback* callback = sw_malloc(sizeof(swTimer_callback));
+    swTimer_callback* callback = emalloc(sizeof(swTimer_callback));
     callback->data = NULL;
 
     if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "lz|z",  &interval ,&(callback->callback), &(callback->data) ) == FAILURE)
@@ -2265,10 +2271,20 @@ PHP_FUNCTION(swoole_timer_clear)
     {
         return;
     }
-    if (SwooleG.timer.del(&SwooleG.timer, -1, id) < 0)
+
+    swTimer_callback *callback = SwooleG.timer.del(&SwooleG.timer, -1, id);
+    if (!callback)
     {
         RETURN_FALSE;
     }
+
+    if (callback->data)
+    {
+        zval_ptr_dtor(&callback->data);
+    }
+    zval_ptr_dtor(&callback->callback);
+    efree(callback);
+
     RETURN_TRUE;
 }
 
@@ -2328,7 +2344,7 @@ PHP_FUNCTION(swoole_server_taskwait)
 
     if (SwooleWG.id >= serv->worker_num)
     {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "dispatch tasks in task workers is not supported");
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "cannot dispatch task in task worker.");
         RETURN_FALSE;
     }
 
@@ -2386,7 +2402,7 @@ PHP_FUNCTION(swoole_server_taskwait)
     //clear history task
     while (read(efd, &notify, sizeof(notify)) > 0);
  
-    if (swProcessPool_dispatch(&SwooleGS->task_workers, &buf, (int*) &worker_id) >= 0)
+    if (swProcessPool_dispatch_blocking(&SwooleGS->task_workers, &buf, (int*) &worker_id) >= 0)
     {
         task_notify_pipe->timeout = timeout;
         int ret = task_notify_pipe->read(task_notify_pipe, &notify, sizeof(notify));
@@ -2503,13 +2519,13 @@ PHP_FUNCTION(swoole_server_task)
 
     if (worker_id >= SwooleG.task_worker_num)
     {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "worker_id must be less than serv->task_worker_num");
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "worker_id must be less than serv->task_worker_num.");
         RETURN_FALSE;
     }
 
     if (SwooleWG.id >= serv->worker_num)
     {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "dispatch tasks in task workers is not supported");
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "cannot dispatch task in task worker.");
         RETURN_FALSE;
     }
 
@@ -2632,7 +2648,7 @@ PHP_METHOD(swoole_server, sendmessage)
     }
 
     swWorker *to_worker = swServer_get_worker(serv, worker_id);
-    SW_CHECK_RETURN(swWorker_send2worker(to_worker, SW_PIPE_MASTER, &buf, sizeof(buf.info) + buf.info.len));
+    SW_CHECK_RETURN(swWorker_send2worker(to_worker, &buf, sizeof(buf.info) + buf.info.len, SW_PIPE_MASTER | SW_PIPE_NONBLOCK));
 }
 
 PHP_FUNCTION(swoole_server_finish)
@@ -2749,10 +2765,8 @@ PHP_FUNCTION(swoole_connection_info)
     }
     SWOOLE_GET_SERVER(zobject, serv);
 
-    swConnection *conn = swServer_connection_get(serv, fd);
-
     //udp client
-    if (conn == NULL)
+    if (swServer_is_udp(fd))
     {
         array_init(return_value);
         php_swoole_udp_t udp_info;
@@ -2778,6 +2792,11 @@ PHP_FUNCTION(swoole_connection_info)
         return;
     }
 
+#ifdef SW_REACTOR_USE_SESSION
+    fd = swServer_get_fd(serv, fd);
+#endif
+
+    swConnection *conn = swServer_connection_get(serv, fd);
     //connection is closed
     if (conn->active == 0 && !noCheckConnection)
     {
@@ -2841,6 +2860,17 @@ PHP_FUNCTION(swoole_connection_list)
     {
         start_fd = swServer_get_minfd(serv);
     }
+#ifdef SW_REACTOR_USE_SESSION
+    else
+    {
+        swConnection *conn = swWorker_get_connection(serv, start_fd);
+        if (!conn)
+        {
+            RETURN_FALSE;
+        }
+        start_fd = conn->fd;
+    }
+#endif
 
     //达到最大，表示已经取完了
     if ((int) start_fd >= serv_max_fd)
@@ -2853,10 +2883,16 @@ PHP_FUNCTION(swoole_connection_list)
 
     for (; fd <= serv_max_fd; fd++)
     {
-        swTrace("maxfd=%d|fd=%d|find_count=%ld|start_fd=%ld", serv_max_fd, fd, find_count, start_fd);
-        if (serv->connection_list[fd].active)
+        swWarn("maxfd=%d, fd=%d, find_count=%ld, start_fd=%ld", serv_max_fd, fd, find_count, start_fd);
+        swConnection *conn = &serv->connection_list[fd];
+
+        if (conn->active && !conn->closed)
         {
+#ifdef SW_REACTOR_USE_SESSION
+            add_next_index_long(return_value, conn->session_id);
+#else
             add_next_index_long(return_value, fd);
+#endif
             find_count--;
         }
         //finish fetch

@@ -98,6 +98,7 @@ static sw_inline int swWorker_excute(swFactory *factory, swEventData *task)
 {
     swServer *serv = factory->ptr;
     swString *package = NULL;
+    swConnection *conn = NULL;
 
     factory->last_from_id = task->info.from_id;
     //worker busy
@@ -111,7 +112,18 @@ static sw_inline int swWorker_excute(swFactory *factory, swEventData *task)
     case SW_EVENT_UNIX_DGRAM:
     //ringbuffer shm package
     case SW_EVENT_PACKAGE:
-        onTask:
+
+        do_task: if (swEventData_is_stream(task->info.type))
+        {
+            conn = swWorker_get_connection(serv, task->info.fd);
+            //socket is closed, discard package.
+            if (!conn || conn->closed)
+            {
+                swWarn("received the wrong data from socket#%d", task->info.fd);
+                break;
+            }
+        }
+
         factory->onTask(factory, task);
 
         if (!SwooleWG.run_always)
@@ -137,7 +149,7 @@ static sw_inline int swWorker_excute(swFactory *factory, swEventData *task)
         //package end
         if (task->info.type == SW_EVENT_PACKAGE_END)
         {
-            goto onTask;
+            goto do_task;
         }
         break;
 
@@ -217,11 +229,13 @@ void swWorker_onStart(swServer *serv)
 
 void swWorker_onStop(swServer *serv)
 {
+    swWorker *worker = swServer_get_worker(serv, SwooleWG.id);
+
     if (serv->onWorkerStop)
     {
         serv->onWorkerStop(serv, SwooleWG.id);
     }
-    swWorker_free(swServer_get_worker(serv, SwooleWG.id));
+    swWorker_free(worker);
 }
 
 /**
@@ -335,11 +349,13 @@ static int swWorker_onPipeReceive(swReactor *reactor, swEvent *event)
 
     if (read(event->fd, &task, sizeof(task)) > 0)
     {
+        ret = swWorker_excute(factory, &task);
+#ifndef SW_WORKER_RECV_AGAIN
         /**
          * Big package
          */
-        ret = swWorker_excute(factory, &task);
         if (task.info.type == SW_EVENT_PACKAGE_START)
+#endif
         {
             //no data
             if (ret < 0 && errno == EAGAIN)
@@ -356,34 +372,44 @@ static int swWorker_onPipeReceive(swReactor *reactor, swEvent *event)
     return SW_ERR;
 }
 
-int swWorker_send2worker(swWorker *dst_worker, uint16_t is_master, void *buf, int n)
+int swWorker_send2worker(swWorker *dst_worker, void *buf, int n, int flag)
 {
     int pipefd, ret;
-    pipefd = is_master ? dst_worker->pipe_master : dst_worker->pipe_worker;
 
-    //message-queue
-    if (dst_worker->pool->use_msgqueue)
+    if (flag & SW_PIPE_MASTER)
     {
-        struct
-        {
-            long mtype;
-            swEventData buf;
-        } msg;
-
-        msg.mtype = dst_worker->id + 1;
-        memcpy(&msg.buf, buf, n);
-
-        ret = dst_worker->pool->queue->in(dst_worker->pool->queue, (swQueue_data *) &msg, n);
+        pipefd = dst_worker->pipe_master;
     }
-    //event worker
-    else if (SwooleG.main_reactor)
-    {
-        ret = SwooleG.main_reactor->write(SwooleG.main_reactor, pipefd, buf, n);
-    }
-    //task worker
     else
     {
-        ret = swSocket_write_blocking(pipefd, buf, n);
+        pipefd = dst_worker->pipe_worker;
+    }
+
+    if (flag & SW_PIPE_NONBLOCK)
+    {
+        return SwooleG.main_reactor->write(SwooleG.main_reactor, pipefd, buf, n);
+    }
+    else
+    {
+        //message-queue
+        if (dst_worker->pool->use_msgqueue)
+        {
+            struct
+            {
+                long mtype;
+                swEventData buf;
+            } msg;
+
+            msg.mtype = dst_worker->id + 1;
+            memcpy(&msg.buf, buf, n);
+
+            ret = dst_worker->pool->queue->in(dst_worker->pool->queue, (swQueue_data *) &msg, n);
+        }
+        //task worker
+        else
+        {
+            ret = swSocket_write_blocking(pipefd, buf, n);
+        }
     }
 
     return ret;

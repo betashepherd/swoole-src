@@ -165,13 +165,11 @@ int swReactorThread_close(swReactor *reactor, int fd)
             else
             {
                 swHttpRequest *request = (swHttpRequest *) conn->object;
-                if (request->state > 0 && request->buffer)
+                if (request->buffer)
                 {
                     swTrace("ConnectionClose. free buffer=%p, request=%p\n", request->buffer, request);
-                    swString_free(request->buffer);
-                    bzero(request, sizeof(swHttpRequest));
+                    swHttpRequest_free(request, conn->http_buffered);
                 }
-                swHttpRequest_free(request);
             }
             conn->object = NULL;
         }
@@ -189,6 +187,11 @@ int swReactorThread_close(swReactor *reactor, int fd)
             swWarn("setsockopt(SO_LINGER) failed. Error: %s[%d]", strerror(errno), errno);
         }
     }
+#endif
+
+#ifdef SW_REACTOR_USE_SESSION
+    swSession *session = &serv->session_list[conn->session_id % serv->max_connection];
+    session->fd = 0;
 #endif
 
     /**
@@ -255,7 +258,9 @@ static int swReactorThread_onPipeReceive(swReactor *reactor, swEvent *ev)
     swPackage_response pkg_resp;
     swWorker *worker;
 
-    //while(1)
+#ifdef SW_REACTOR_RECV_AGAIN
+    while (1)
+#endif
     {
         n = read(ev->fd, &resp, sizeof(resp));
         if (n > 0)
@@ -289,6 +294,7 @@ static int swReactorThread_onPipeReceive(swReactor *reactor, swEvent *ev)
             return SW_ERR;
         }
     }
+
     return SW_OK;
 }
 
@@ -354,14 +360,32 @@ int swReactorThread_send2worker(void *data, int len, uint16_t target_worker_id)
 int swReactorThread_send(swSendData *_send)
 {
     swServer *serv = SwooleG.serv;
+    int fd;
 
-    int fd = _send->info.fd;
-
+#ifdef SW_REACTOR_USE_SESSION
+    int session_id = _send->info.fd;
+    swSession *session = &(serv->session_list[session_id % serv->max_connection]);
+    fd = session->fd;
     swConnection *conn = swServer_connection_get(serv, fd);
+    if (!conn)
+    {
+        swWarn("send to socket#%d failed, the connection is closed.", session_id);
+        return SW_ERR;
+    }
+    if (session->id != session_id || conn->session_id != session_id)
+    {
+        swWarn("send failed, the session#%d has expired.", session_id);
+        return SW_ERR;
+    }
+#else
+    fd = _send->info.fd;
+    swConnection *conn = swServer_connection_get(serv, fd);
+#endif
+
     //The connection has been closed.
     if (conn == NULL || conn->active == 0)
     {
-        swWarn("connection[fd=%d, event=%d] is not active.", fd, _send->info.type);
+        swWarn("connection#%d is not active, events=%d.", fd, _send->info.type);
         return SW_ERR;
     }
 
@@ -387,6 +411,11 @@ int swReactorThread_send(swSendData *_send)
         {
             direct_send:
             {
+                if (conn->removed)
+                {
+                    swWarn("the connection#%d is closed by client.", fd);
+                    return SW_ERR;
+                }
                 int n = swConnection_send(conn, _send->data, _send->length, 0);
                 if (n == _send->length)
                 {
@@ -442,6 +471,11 @@ int swReactorThread_send(swSendData *_send)
     //send data
     else
     {
+        if (conn->removed)
+        {
+            swWarn("the connection#%d is closed by client.", fd);
+            return SW_ERR;
+        }
         if (conn->out_buffer->length >= serv->buffer_output_size)
         {
             swWarn("Connection output buffer overflow.");
@@ -499,11 +533,26 @@ static int swReactorThread_onWrite(swReactor *reactor, swEvent *ev)
 {
     int ret;
     swServer *serv = SwooleG.serv;
+    int fd = ev->fd;
 
-    swConnection *conn = swServer_connection_get(serv, ev->fd);
+    swConnection *conn = swServer_connection_get(serv, fd);
     if (conn->active == 0)
     {
         return SW_OK;
+    }
+    //notify worker process
+    else if (conn->connect_notify)
+    {
+        swDataHead connect_event;
+        connect_event.type = SW_EVENT_CONNECT;
+        connect_event.from_id = reactor->id;
+        connect_event.fd = fd;
+        if (serv->factory.notify(&serv->factory, &connect_event) < 0)
+        {
+            swWarn("send notification [fd=%d] failed.", fd);
+        }
+        conn->connect_notify = 0;
+        return reactor->set(reactor, fd, SW_EVENT_TCP | SW_EVENT_READ);
     }
 
     swBuffer_trunk *chunk;
@@ -514,7 +563,7 @@ static int swReactorThread_onWrite(swReactor *reactor, swEvent *ev)
         if (chunk->type == SW_CHUNK_CLOSE)
         {
             close_fd:
-            reactor->close(reactor, ev->fd);
+            reactor->close(reactor, fd);
             return SW_OK;
         }
         else if (chunk->type == SW_CHUNK_SENDFILE)
@@ -547,7 +596,7 @@ static int swReactorThread_onWrite(swReactor *reactor, swEvent *ev)
     //remove EPOLLOUT event
     if (swBuffer_empty(conn->out_buffer))
     {
-        reactor->set(reactor, ev->fd, SW_FD_TCP | SW_EVENT_READ);
+        reactor->set(reactor, fd, SW_FD_TCP | SW_EVENT_READ);
     }
     return SW_OK;
 }
@@ -671,16 +720,16 @@ static int swReactorThread_onReceive_no_buffer(swReactor *reactor, swEvent *even
     {
         switch (swConnection_error(errno))
         {
-            case SW_ERROR:
+        case SW_ERROR:
             swSysError("recv from connection[%d@%d] failed.", event->fd, reactor->id);
-                return SW_OK;
-            case SW_CLOSE:
-                goto close_fd;
-            default:
-                return SW_OK;
+            return SW_OK;
+        case SW_CLOSE:
+            goto close_fd;
+        default:
+            return SW_OK;
         }
     }
-        //需要检测errno来区分是EAGAIN还是ECONNRESET
+    //需要检测errno来区分是EAGAIN还是ECONNRESET
     else if (n == 0)
     {
         close_fd:
@@ -1208,7 +1257,7 @@ static int swReactorThread_onReceive_http_request(swReactor *reactor, swEvent *e
             if (conn->object != NULL)
             {
                 swHttpRequest *request = (swHttpRequest *) conn->object;
-                swHttpRequest_free(request);
+                swHttpRequest_free(request, conn->http_buffered);
                 conn->object = NULL;
             }
             conn->websocket_status = WEBSOCKET_STATUS_FRAME;
@@ -1266,13 +1315,15 @@ static int swReactorThread_onReceive_http_request(swReactor *reactor, swEvent *e
     {
         close_fd:
         swReactorThread_onClose(reactor, event);
-        swHttpRequest_free(request);
+        swHttpRequest_free(request, conn->http_buffered);
         return SW_OK;
     }
     else
     {
         conn->last_time = SwooleGS->now;
         
+        swTrace("receive %d bytes: %*s\n", n, n, buf);
+
         if (request->method == 0)
         {
             bzero(&tmp_package, sizeof(tmp_package));
@@ -1306,7 +1357,7 @@ static int swReactorThread_onReceive_http_request(swReactor *reactor, swEvent *e
             if (memcmp(buffer->str + buffer->length - 4, "\r\n\r\n", 4) == 0)
             {
                 swReactorThread_send_string_buffer(swServer_get_thread(serv, SwooleTG.id), conn, buffer);
-                swHttpRequest_free(request);
+                swHttpRequest_free(request, conn->http_buffered);
             }
             else if (buffer->size == buffer->length)
             {
@@ -1317,11 +1368,11 @@ static int swReactorThread_onReceive_http_request(swReactor *reactor, swEvent *e
             else
             {
                 wait_more_data:
-                if (request->state == 0)
+                if (!conn->http_buffered)
                 {
-                    swTrace("@@@@@@@@@@@@@@@@@##################################wait data 0");
+                    swTrace("wait more data. content_length=%d, header_length=%d", request->content_length, request->header_length);
                     request->buffer = swString_dup2(buffer);
-                    request->state = SW_WAIT;
+                    conn->http_buffered = 1;
                 }
                 goto recv_data;
             }
@@ -1350,6 +1401,29 @@ static int swReactorThread_onReceive_http_request(swReactor *reactor, swEvent *e
                 goto close_fd;
             }
 
+            //http header is not the end
+            if (request->header_length == 0)
+            {
+                if (!conn->http_buffered)
+                {
+                    request->buffer = swString_dup2(buffer);
+                    conn->http_buffered = 1;
+                    return SW_OK;
+                }
+                else
+                {
+                    if (buffer->size == buffer->length)
+                    {
+                        swWarn("http header is too long.");
+                        goto close_fd;
+                    }
+                    if (swHttpRequest_get_header_length(request) < 0)
+                    {
+                        return SW_OK;
+                    }
+                }
+            }
+
             uint32_t request_size = request->content_length + request->header_length;
 
             //discard the redundant data
@@ -1361,14 +1435,14 @@ static int swReactorThread_onReceive_http_request(swReactor *reactor, swEvent *e
             if (buffer->length == request_size)
             {
                 swReactorThread_send_string_buffer(swServer_get_thread(serv, SwooleTG.id), conn, buffer);
-                swHttpRequest_free(request);
+                swHttpRequest_free(request, conn->http_buffered);
             }
             else
             {
                 swTrace("PostWait: request->content_length=%d, buffer->length=%zd, request->header_length=%d\n",
                         request->content_length, buffer->length, request->header_length);
 
-                if (request->state > 0)
+                if (conn->http_buffered)
                 {
                     if (request->content_length > buffer->size && swString_extend(buffer, request->content_length) < 0)
                     {
@@ -1424,6 +1498,15 @@ int swReactorThread_create(swServer *serv)
         return SW_ERR;
     }
 
+#ifdef SW_REACTOR_USE_SESSION
+    serv->session_list = sw_shm_calloc(serv->max_connection, sizeof(swSession));
+    if (serv->session_list == NULL)
+    {
+        swError("sw_shm_calloc(%ld) for session_list failed", serv->max_connection * sizeof(swSession));
+        return SW_ERR;
+    }
+#endif
+
     //create factry object
     if (serv->factory_mode == SW_MODE_THREAD)
     {
@@ -1463,6 +1546,7 @@ int swReactorThread_start(swServer *serv, swReactor *main_reactor_ptr)
     pthread_t pidt;
 
     int i, ret;
+
     //listen UDP
     if (serv->have_udp_sock == 1)
     {
@@ -1966,6 +2050,11 @@ void swReactorThread_free(swServer *serv)
                 }
             }
         }
+    }
+
+    if (serv->session_list)
+    {
+        sw_shm_free(serv->session_list);
     }
 }
 

@@ -23,7 +23,7 @@
 
 static int swTimer_signal_set(swTimer *timer, int interval);
 static int swTimer_timerfd_set(swTimer *timer, int interval);
-static int swTimer_del(swTimer *timer, int ms, int id);
+static void* swTimer_del(swTimer *timer, int ms, int id);
 static void swTimer_free(swTimer *timer);
 static int swTimer_add(swTimer *timer, int msec, int interval, void *data);
 static int swTimer_set(swTimer *timer, int new_interval);
@@ -184,17 +184,19 @@ static int swTimer_signal_set(swTimer *timer, int interval)
 	return SW_OK;
 }
 
-static int swTimer_del(swTimer *timer, int ms, int id)
+static void* swTimer_del(swTimer *timer, int interval_ms, int id)
 {
-    if (id > 0)
+    swTimer_node *node = swTimer_node_find(&timer->root, interval_ms, id);
+    if (!node)
     {
-        swTimer_node_delete(&timer->root, ms, id);
+        return NULL;
     }
-    else
+    if (interval_ms)
     {
-        swHashMap_del_int(timer->list, ms);
+        swHashMap_del_int(timer->list, interval_ms);
     }
-	return SW_OK;
+    node->remove = 1;
+    return node->data;
 }
 
 static void swTimer_free(swTimer *timer)
@@ -237,14 +239,14 @@ static int swTimer_add(swTimer *timer, int msec, int interval, void *data)
     {
         return swTimer_addtimeout(timer, msec, data);
     }
-    swTimer_interval_node *node = sw_malloc(sizeof(swTimer_interval_node));
+    swTimer_node *node = sw_malloc(sizeof(swTimer_node));
     if (node == NULL)
     {
         swWarn("malloc failed.");
         return SW_ERR;
     }
 
-    bzero(node, sizeof(swTimer_interval_node));
+    bzero(node, sizeof(swTimer_node));
     node->interval = msec;
     if (gettimeofday(&node->lasttime, NULL) < 0)
     {
@@ -265,7 +267,7 @@ static int swTimer_add(swTimer *timer, int msec, int interval, void *data)
 int swTimer_select(swTimer *timer)
 {
     uint64_t key;
-    swTimer_interval_node *timer_node;
+    swTimer_node *timer_node;
     struct timeval now;
 
     if (gettimeofday(&now, NULL) < 0)
@@ -325,7 +327,7 @@ int swTimer_select(swTimer *timer)
         if (interval >= timer_node->interval - 1)
         {
             memcpy(&timer_node->lasttime, &now, sizeof(now));
-            timer->onTimer(timer, timer_node->interval);
+            timer->onTimer(timer, timer_node);
         }
     } while (timer_node);
     return SW_OK;
@@ -406,6 +408,7 @@ void swTimer_node_insert(swTimer_node **root, swTimer_node *new_node)
         {
             new_node->prev = tmp->prev;
             new_node->next = tmp;
+
             if (new_node->prev)
             {
                 new_node->prev->next = new_node;
@@ -431,33 +434,18 @@ void swTimer_node_insert(swTimer_node **root, swTimer_node *new_node)
     }
 }
 
-int swTimer_node_delete(swTimer_node **root, int interval_msec, int id)
+swTimer_node* swTimer_node_find(swTimer_node **root, int interval_msec, int id)
 {
     swTimer_node *tmp = *root;
-
     while (tmp)
     {
         if ((interval_msec > 0 && tmp->interval == interval_msec) || (id > 0 && tmp->id == id))
         {
-            if (tmp->prev)
-            {
-                tmp->prev->next = tmp->next;
-                if (tmp->next)
-                {
-                    tmp->next->prev = tmp->prev;
-                }
-                return SW_OK;
-            }
-            else
-            {
-                *root = tmp->next;
-                sw_free(tmp);
-                return SW_OK;
-            }
+            return tmp;
         }
         tmp = tmp->next;
     }
-    return SW_ERR;
+    return NULL;
 }
 
 void swTimer_node_destory(swTimer_node **root)
