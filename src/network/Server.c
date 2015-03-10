@@ -117,16 +117,29 @@ int swServer_master_onAccept(swReactor *reactor, swEvent *event)
         sub_reactor = &serv->reactor_threads[reactor_id].reactor;
 
 #ifdef SW_REACTOR_USE_SESSION
-        uint32_t session_id = (serv->session_round++) % SW_MAX_SOCKET_ID;
-        if (session_id == 0)
+        uint32_t session_id = 1;
+        swSession *session;
+
+        //get session id
+        for (i = 0; i < serv->max_connection; i++)
         {
-            session_id = 1;
-            serv->session_round++;
+            session_id = (serv->session_round++) % SW_MAX_SOCKET_ID;
+            if (session_id == 0)
+            {
+                session_id = 1;
+                serv->session_round++;
+            }
+
+            session = &serv->session_list[session_id % serv->max_connection];
+            //vacancy
+            if (session->fd == 0)
+            {
+                session->fd = new_fd;
+                session->id = session_id;
+                break;
+            }
         }
         conn->session_id = session_id;
-        swSession *session = &serv->session_list[session_id % serv->max_connection];
-        session->fd = new_fd;
-        session->id = session_id;
 #endif
 
 #ifdef SW_USE_OPENSSL
@@ -137,7 +150,7 @@ int swServer_master_onAccept(swReactor *reactor, swEvent *event)
 			{
 				if (swSSL_create(conn, 0) < 0)
 				{
-					conn->active = 0;
+					bzero(conn, sizeof(swConnection));
 					close(new_fd);
 				}
 			}
@@ -163,6 +176,7 @@ int swServer_master_onAccept(swReactor *reactor, swEvent *event)
 
         if (ret < 0)
         {
+            bzero(conn, sizeof(swConnection));
             close(new_fd);
             return SW_OK;
         }
@@ -369,6 +383,19 @@ int swServer_worker_init(swServer *serv, swWorker *worker)
     }
 #endif
 
+    if (serv->max_request < 1)
+    {
+        SwooleWG.run_always = 1;
+    }
+    else
+    {
+        SwooleWG.request_num = serv->max_request;
+        if (SwooleWG.request_num > 10)
+        {
+            SwooleWG.request_num += rand() % 10 * worker->id;
+        }
+    }
+
     return SW_OK;
 }
 
@@ -548,7 +575,6 @@ void swServer_init(swServer *serv)
     serv->factory_mode = SW_MODE_BASE;
 
     serv->reactor_num = SW_REACTOR_NUM > SW_REACTOR_MAX_THREAD ? SW_REACTOR_MAX_THREAD : SW_REACTOR_NUM;
-    serv->reactor_ringbuffer_size = SW_REACTOR_RINGBUFFER_SIZE;
 
     serv->dispatch_mode = SW_DISPATCH_FDMOD;
     serv->ringbuffer_size = SW_QUEUE_SIZE;
@@ -1117,6 +1143,8 @@ static void swHeartbeatThread_loop(swThreadParam *param)
     int serv_max_fd;
     int serv_min_fd;
     int checktime;
+
+    SwooleTG.type = SW_THREAD_HEARTBEAT;
 
     bzero(&notify_ev, sizeof(notify_ev));
     notify_ev.type = SW_EVENT_CLOSE;

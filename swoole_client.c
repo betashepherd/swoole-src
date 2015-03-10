@@ -8,7 +8,7 @@
   | http://www.apache.org/licenses/LICENSE-2.0.html                      |
   | If you did not receive a copy of the Apache2.0 license and are unable|
   | to obtain it through the world-wide-web, please send a note to       |
-  | license@php.net so we can mail you a copy immediately.               |
+  | license@swoole.com so we can mail you a copy immediately.            |
   +----------------------------------------------------------------------+
   | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
   +----------------------------------------------------------------------+
@@ -70,8 +70,6 @@ static int php_swoole_client_onError(swReactor *reactor, swEvent *event);
 
 static int swoole_client_error_callback(zval *zobject, swEvent *event, int error TSRMLS_DC);
 
-static void php_swoole_onTimeout(swTimer *timer, swTimer_node *event);
-static void php_swoole_onTimerInterval(swTimer *timer, swTimer_node *event);
 
 static swClient* swoole_client_create_socket(zval *object, char *host, int host_len, int port);
 
@@ -452,34 +450,6 @@ void php_swoole_check_reactor()
 	return;
 }
 
-void php_swoole_check_timer(int msec)
-{
-    if (SwooleG.timer.fd == 0)
-    {
-        if (SwooleG.serv)
-        {
-            SwooleG.timer.onTimer = swServer_onTimer;
-        }
-        else
-        {
-            SwooleG.timer.onTimer = php_swoole_onTimerInterval;
-        }
-
-        if (!SwooleG.main_reactor)
-        {
-            swTimer_init(msec, SwooleG.use_timer_pipe);
-        }
-        else
-        {
-            swEventTimer_init();
-            SwooleG.main_reactor->timeout_msec = msec;
-        }
-
-        SwooleG.timer.interval = msec;
-        SwooleG.timer.onTimeout = php_swoole_onTimeout;
-    }
-}
-
 void php_swoole_try_run_reactor()
 {
     //only client side
@@ -519,72 +489,6 @@ void php_swoole_try_run_reactor()
         }
 #endif
     }
-}
-
-static void php_swoole_onTimeout(swTimer *timer, swTimer_node *event)
-{
-    swTimer_callback *callback = (swTimer_callback*) event->data;
-    zval *retval = NULL;
-    TSRMLS_FETCH_FROM_CTX(sw_thread_ctx ? sw_thread_ctx : NULL);
-
-    zval **args[1];
-    int argc = 0;
-
-    if (callback->data)
-    {
-        args[0] = &callback->data;
-        argc = 1;
-    }
-
-    if (call_user_function_ex(EG(function_table), NULL, callback->callback, &retval, argc, args, 0, NULL TSRMLS_CC) == FAILURE)
-    {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "swoole_timer: onTimeout handler error");
-        return;
-    }
-
-    if (retval)
-    {
-        zval_ptr_dtor(&retval);
-    }
-    if (callback->data)
-    {
-        zval_ptr_dtor(&callback->data);
-    }
-    zval_ptr_dtor(&callback->callback);
-    efree(callback);
-}
-
-static void php_swoole_onTimerInterval(swTimer *timer, swTimer_node *event)
-{
-    zval *retval;
-    zval **args[1];
-    swoole_timer_item *timer_item;
-    uint32_t interval = event->interval;
-
-	TSRMLS_FETCH_FROM_CTX(sw_thread_ctx ? sw_thread_ctx : NULL);
-
-    if (zend_hash_find(&php_sw_timer_callback, (char *) &interval, sizeof(interval), (void**) &timer_item) != SUCCESS)
-    {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "swoole_timer: onTimerCallback not found");
-        return;
-    }
-
-	zval *zinterval;
-	MAKE_STD_ZVAL(zinterval);
-	ZVAL_LONG(zinterval, interval);
-
-	args[0] = &zinterval;
-
-	if (call_user_function_ex(EG(function_table), NULL, timer_item->callback, &retval, 1, args, 0, NULL TSRMLS_CC) == FAILURE)
-	{
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "swoole_timer: onTimerCallback handler error");
-		return;
-	}
-	if (retval != NULL)
-	{
-		zval_ptr_dtor(&retval);
-	}
-	zval_ptr_dtor(&zinterval);
 }
 
 static swClient* swoole_client_create_socket(zval *object, char *host, int host_len, int port)
@@ -693,69 +597,6 @@ static swClient* swoole_client_create_socket(zval *object, char *host, int host_
     }
 	return cli;
 }
-
-
-PHP_FUNCTION(swoole_timer_add)
-{
-	swoole_timer_item timer_item;
-	long interval;
-
-	if (swIsMaster())
-	{
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "swoole_timer_add can not use in swoole_server. Please use swoole_server->addtimer");
-		RETURN_FALSE;
-	}
-
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "lz", &interval, &timer_item.callback) == FAILURE)
-	{
-		return;
-	}
-
-#ifdef ZTS
-	if (sw_thread_ctx == NULL)
-	{
-		TSRMLS_SET_CTX(sw_thread_ctx);
-	}
-#endif
-
-	zval_add_ref(&timer_item.callback);
-	timer_item.interval = (int)interval;
-
-	if (zend_hash_update(&php_sw_timer_callback, (char *)&timer_item.interval, sizeof(timer_item.interval), &timer_item, sizeof(swoole_timer_item), NULL) == FAILURE)
-	{
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "swoole_timer_add add to hashtable failed.");
-		RETURN_FALSE;
-	}
-
-	php_swoole_check_reactor();
-	php_swoole_check_timer(timer_item.interval);
-
-	if (SwooleG.timer.add(&SwooleG.timer, timer_item.interval, 1, NULL) < 0)
-	{
-		RETURN_FALSE;
-	}
-
-	php_swoole_try_run_reactor();
-	RETURN_TRUE;
-}
-
-PHP_FUNCTION(swoole_timer_del)
-{
-	long interval;
-
-	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "l", &interval) == FAILURE)
-	{
-		return;
-	}
-	if (SwooleG.timer.fd == 0)
-	{
-		php_error_docref(NULL TSRMLS_CC, E_WARNING, "no timer.");
-		RETURN_FALSE;
-	}
-    SwooleG.timer.del(&SwooleG.timer, (int) interval, -1);
-    RETURN_TRUE;
-}
-
 
 PHP_METHOD(swoole_client, __construct)
 {
@@ -867,6 +708,7 @@ PHP_METHOD(swoole_client, connect)
 
         cli->socket->object = getThis();
         cli->reactor_fdtype = SW_FD_USER + 1;
+        zval_add_ref(&getThis());
 
 		if (cli->type == SW_SOCK_TCP || cli->type == SW_SOCK_TCP6)
 		{
@@ -1092,9 +934,7 @@ PHP_METHOD(swoole_client, recv)
     {
         if (ret == 0)
         {
-            php_swoole_client_close(getThis(), cli->socket->fd TSRMLS_CC);
-            efree(buf);
-            RETURN_FALSE;
+            RETURN_EMPTY_STRING();
         }
         else
         {
@@ -1375,20 +1215,22 @@ static int php_swoole_client_event_loop(zval *sock_array, fd_set *fds TSRMLS_DC)
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "object is not swoole_client object.");
 			continue;
 		}
-		if ((Z_LVAL(*zsock) < FD_SETSIZE) && FD_ISSET(Z_LVAL(*zsock), fds))
-		{
-			switch (zend_hash_get_current_key_ex(Z_ARRVAL_P(sock_array), &key, &key_len, &num_key, 0, NULL))
-			{
-			case HASH_KEY_IS_STRING:
-				zend_hash_add(new_hash, key, key_len, (void * )element, sizeof(zval *), (void ** )&dest_element);
-				break;
-			case HASH_KEY_IS_LONG:
-				zend_hash_index_update(new_hash, num_key, (void * )element, sizeof(zval *), (void ** )&dest_element);
-				break;
-			}
-			if (dest_element)
-				zval_add_ref(dest_element);
-		}
+        if ((Z_LVAL(*zsock) < FD_SETSIZE) && FD_ISSET(Z_LVAL(*zsock), fds))
+        {
+            switch (zend_hash_get_current_key_ex(Z_ARRVAL_P(sock_array), &key, &key_len, &num_key, 0, NULL))
+            {
+            case HASH_KEY_IS_STRING:
+                zend_hash_add(new_hash, key, key_len, (void * )element, sizeof(zval *), (void ** )&dest_element);
+                break;
+            case HASH_KEY_IS_LONG:
+                zend_hash_index_update(new_hash, num_key, (void * )element, sizeof(zval *), (void ** )&dest_element);
+                break;
+            }
+            if (dest_element)
+            {
+                zval_add_ref(dest_element);
+            }
+        }
 		num++;
 	}
 

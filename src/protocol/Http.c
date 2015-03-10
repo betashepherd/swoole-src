@@ -111,12 +111,13 @@ int swHttpRequest_get_protocol(swHttpRequest *request)
     return SW_OK;
 }
 
-void swHttpRequest_free(swHttpRequest *request, int free_buffer)
+void swHttpRequest_free(swConnection *conn, swHttpRequest *request)
 {
-    if (free_buffer && request->buffer)
+    if (conn->http_buffered && request->buffer)
     {
         swTrace("RequestShutdown. free buffer=%p, request=%p\n", request->buffer, request);
         swString_free(request->buffer);
+        conn->http_buffered = 0;
     }
     bzero(request, sizeof(swHttpRequest));
 }
@@ -140,7 +141,7 @@ int swHttpRequest_get_content_length(swHttpRequest *request)
         {
             if (state == 0)
             {
-                if (memcmp(p + 2, SW_STRL("Content-Length") - 1) == 0)
+                if (strncasecmp(p + 2, SW_STRL("Content-Length") - 1) == 0)
                 {
                     p += sizeof("Content-Length: ");
                     request->content_length = atoi(p);

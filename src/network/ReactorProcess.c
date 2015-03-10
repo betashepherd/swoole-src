@@ -173,7 +173,10 @@ static int swReactorProcess_loop(swProcessPool *pool, swWorker *worker)
     swReactor *reactor = &(serv->reactor_threads[0].reactor);
 
     SwooleG.process_type = SW_PROCESS_WORKER;
+    SwooleG.pid = getpid();
+
     SwooleWG.id = worker->id;
+    SwooleWG.request_num = serv->max_request;
 
     swServer_worker_init(serv, worker);
 

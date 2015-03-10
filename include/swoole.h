@@ -8,7 +8,7 @@
   | http://www.apache.org/licenses/LICENSE-2.0.html                      |
   | If you did not receive a copy of the Apache2.0 license and are unable|
   | to obtain it through the world-wide-web, please send a note to       |
-  | license@php.net so we can mail you a copy immediately.               |
+  | license@swoole.com so we can mail you a copy immediately.            |
   +----------------------------------------------------------------------+
   | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
   +----------------------------------------------------------------------+
@@ -857,6 +857,7 @@ int swoole_system_random(int min, int max);
 swString* swoole_file_get_contents(char *filename);
 void swoole_open_remote_debug(void);
 int swoole_strnpos(char *haystack, char *needle, uint32_t length);
+char *swoole_dec2hex(int value, int base);
 
 void swoole_ioctl_set_block(int sock, int nonblock);
 void swoole_fcntl_set_block(int sock, int nonblock);
@@ -1176,6 +1177,7 @@ int swReactor_del(swReactor *reactor, int fd);
 int swReactor_onWrite(swReactor *reactor, swEvent *ev);
 int swReactor_close(swReactor *reactor, int fd);
 int swReactor_write(swReactor *reactor, int fd, void *buf, int n);
+int swReactor_wait_write_buffer(swReactor *reactor, int fd);
 
 swReactor_handle swReactor_getHandle(swReactor *reactor, int event_type, int fdtype);
 int swReactorEpoll_create(swReactor *reactor, int max_event_num);
@@ -1377,6 +1379,8 @@ typedef struct
     uint32_t reactor_init :1;
     uint32_t reactor_ready :1;
     uint32_t in_client :1;
+
+    int request_num;
 
 	swString **buffer_input;
     swWorker *worker;

@@ -139,14 +139,15 @@ function long_tcp(Swoole_Benchmark $bc)
 /**
  * 去掉计时信息的UDP
  * @param $bc
+ * @return bool
  */
 function udp(Swoole_Benchmark $bc)
 {
 	static $fp;
-	if(empty($fp))
+	if (empty($fp))
 	{
 		$fp = stream_socket_client($bc->server_url, $errno, $errstr, 1);
-		if(!$fp)
+		if (!$fp)
 		{
 			echo "{$errstr}[{$errno}]\n";
 			return false;
@@ -156,7 +157,10 @@ function udp(Swoole_Benchmark $bc)
 	fwrite($fp, $bc->send_data);
 	/*--------读取Sokcet-------*/
 	$ret = fread($fp, $bc->read_len);
-	if(empty($ret)) return false;
+	if (empty($ret))
+	{
+		return false;
+	}
 	return true;
 }
 
@@ -164,13 +168,13 @@ function udp2(Swoole_Benchmark $bc)
 {
 	static $fp;
 	$start = microtime(true);
-	if(empty($fp))
+	if (empty($fp))
 	{
 		$u = parse_url($bc->server_url);
 		$fp = new swoole_client(SWOOLE_SOCK_UDP);
 		$fp->connect($u['host'], $u['port'], 0.5, 0);
 		$end = microtime(true);
-		$conn_use = $end-$start;
+		$conn_use = $end - $start;
 		$bc->max_conn_time = $conn_use;
 		$start = $end;
 	}
@@ -178,17 +182,25 @@ function udp2(Swoole_Benchmark $bc)
 	$fp->send($bc->send_data);
 	$end = microtime(true);
 	$write_use = $end - $start;
-	if($write_use > $bc->max_write_time) $bc->max_write_time = $write_use;
+	if ($write_use > $bc->max_write_time)
+	{
+		$bc->max_write_time = $write_use;
+	}
 	$start = $end;
 	/*--------读取Sokcet-------*/
 	$ret = $fp->recv();
-	if(empty($ret)) return false;
+	if (empty($ret))
+	{
+		return false;
+	}
 
 	$end = microtime(true);
 	$read_use = $end - $start;
-	if($read_use>$bc->max_read_time) $bc->max_read_time = $read_use;
+	if ($read_use > $bc->max_read_time)
+	{
+		$bc->max_read_time = $read_use;
+	}
 	return true;
-
 }
 
 function short_tcp($bc)
@@ -241,11 +253,17 @@ class Swoole_Benchmark
 
     public $pid;
 
+	protected $tmp_dir = '/tmp/swoole_bench/';
+
 	function __construct($func)
 	{
-		if(!function_exists($func))
+		if (!function_exists($func))
 		{
-			exit(__CLASS__.": function[$func] not exists\n");
+			exit(__CLASS__ . ": function[$func] not exists\n");
+		}
+		if (!is_dir($this->tmp_dir))
+		{
+			mkdir($this->tmp_dir);
 		}
 		$this->test_func = $func;
 	}
@@ -254,18 +272,19 @@ class Swoole_Benchmark
 		unlink($this->shm_key);
 		foreach($this->child_pid as $pid)
 		{
-			unlink('/dev/shm/lost_'.$pid.'.log');
+			unlink($this->tmp_dir.'lost_'.$pid.'.log');
 		}
 	}
+
 	function run()
 	{
 		$this->main_pid = posix_getpid();
-		$this->shm_key = "/dev/shm/t.log";
-		for($i=0;$i<$this->process_num;$i++)
+		$this->shm_key = $this->tmp_dir.'t.log';
+		for ($i = 0; $i < $this->process_num; $i++)
 		{
-			$this->child_pid[] = $this->start(array($this,'worker'));
+			$this->child_pid[] = $this->start(array($this, 'worker'));
 		}
-		for($i=0;$i<$this->process_num;$i++)
+		for ($i = 0; $i < $this->process_num; $i++)
 		{
 			$status = 0;
 			$pid = pcntl_wait($status);
@@ -319,17 +338,17 @@ class Swoole_Benchmark
 			$func = $this->test_func;
 			if(!$func($this)) $lost++;
 		}
-		if($this->show_detail)
+		if ($this->show_detail)
 		{
-			$log  = $pid."#\ttotal_use(s):".substr(microtime(true)-$start,0,5);
-			$log .= "\tconnect(ms):".substr($this->max_conn_time*1000,0,5);
-			$log .= "\twrite(ms):".substr($this->max_write_time*1000,0,5);
-			$log .= "\tread(ms):".substr($this->max_read_time*1000,0,5);
-			file_put_contents('/dev/shm/lost_'.$this->pid.'.log', $lost."\n".$log);
+			$log = $pid . "#\ttotal_use(s):" . substr(microtime(true) - $start, 0, 5);
+			$log .= "\tconnect(ms):" . substr($this->max_conn_time * 1000, 0, 5);
+			$log .= "\twrite(ms):" . substr($this->max_write_time * 1000, 0, 5);
+			$log .= "\tread(ms):" . substr($this->max_read_time * 1000, 0, 5);
+			file_put_contents($this->tmp_dir.'lost_' . $this->pid . '.log', $lost . "\n" . $log);
 		}
 		else
 		{
-			file_put_contents('/dev/shm/lost_'.$this->pid.'.log', $lost);
+			file_put_contents($this->tmp_dir.'lost_'.$this->pid.'.log', $lost);
 		}
 		exit(0);
 	}
@@ -341,7 +360,7 @@ class Swoole_Benchmark
 
 		foreach ($this->child_pid as $f)
 		{
-			$_lost = file_get_contents('/dev/shm/lost_'.$f.'.log');
+			$_lost = file_get_contents($this->tmp_dir.'lost_'.$f.'.log');
 			$log = explode("\n",$_lost,2);
 			if(!empty($log))
 			{

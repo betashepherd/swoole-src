@@ -196,9 +196,7 @@ int swFactory_end(swFactory *factory, int fd);
 int swFactory_check_callback(swFactory *factory);
 
 int swFactoryProcess_create(swFactory *factory, int worker_num);
-int swFactoryProcess_start(swFactory *factory);
-int swFactoryProcess_shutdown(swFactory *factory);
-int swFactoryProcess_end(swFactory *factory, int fd);
+
 
 int swFactoryThread_create(swFactory *factory, int writer_num);
 int swFactoryThread_start(swFactory *factory);
@@ -277,11 +275,6 @@ struct _swServer
     uint16_t worker_round_id;
 
     /**
-     * reactor ringbuffer memory pool size
-     */
-    size_t reactor_ringbuffer_size;
-
-    /**
      * run as a daemon process
      */
     uint32_t daemonize :1;
@@ -325,6 +318,11 @@ struct _swServer
      * built-in http protocol
      */
     uint32_t open_http_protocol :1;
+
+    /**
+     * built-in websocket protocol
+     */
+    uint32_t open_websocket_protocol :1;
 
     /**
      *  one package: length check
@@ -465,8 +463,8 @@ typedef struct _swPackage
 
 typedef struct
 {
-	int length;
-	char tmpfile[sizeof(SW_TASK_TMP_FILE)];
+    int length;
+    char tmpfile[SW_TASK_TMPDIR_SIZE + sizeof(SW_TASK_TMP_FILE)];
 } swPackage_task;
 
 typedef struct
@@ -495,9 +493,9 @@ int swServer_tcp_send(swServer *serv, int fd, void *data, uint32_t length);
 //UDP, UDP必然超过0x1000000
 //原因：IPv4的第4字节最小为1,而这里的conn_fd是网络字节序
 #define SW_MAX_SOCKET_ID             0x1000000
-#define swServer_is_udp(fd)          (fd > 0x1000000)
-#define swEventData_is_stream(type)  (type == SW_EVENT_TCP || type == SW_EVENT_TCP6 || type == SW_EVENT_UNIX_STREAM)
+#define swServer_is_udp(fd)          ((uint32_t) fd > 0x1000000)
 #define swEventData_is_dgram(type)   (type == SW_EVENT_UDP || type == SW_EVENT_UDP6 || type == SW_EVENT_UNIX_DGRAM)
+#define swEventData_is_stream(type)  (type == SW_EVENT_TCP || type == SW_EVENT_TCP6 || type == SW_EVENT_UNIX_STREAM)
 
 swPipe * swServer_pipe_get(swServer *serv, int pipe_fd);
 void swServer_pipe_set(swServer *serv, swPipe *p);
@@ -521,19 +519,18 @@ int swTaskWorker_finish(swServer *serv, char *data, int data_len, int flags);
 	_length = _pkg.length;\
     if (_length > SwooleG.serv->package_max_length) {\
         swWarn("task package is too big.");\
-	    _length = -1;\
-    } else { \
-        _buf = __malloc(_length + 1);\
-        _buf[_length] = 0;\
-        int tmp_file_fd = open(_pkg.tmpfile, O_RDONLY);\
-        if (tmp_file_fd < 0){\
-            swSysError("open(%s) failed.", task->data);\
-            _length = -1;\
-        } else if (swoole_sync_readfile(tmp_file_fd, _buf, _length) > 0) {\
-            unlink(_pkg.tmpfile);\
-        } else {\
-            _length = -1;\
-        }\
+    }\
+    _buf = __malloc(_length + 1);\
+    _buf[_length] = 0;\
+    int tmp_file_fd = open(_pkg.tmpfile, O_RDONLY);\
+    if (tmp_file_fd < 0){\
+        swSysError("open(%s) failed.", task->data);\
+        _length = -1;\
+    } else if (swoole_sync_readfile(tmp_file_fd, _buf, _length) > 0) {\
+        close(tmp_file_fd);\
+        unlink(_pkg.tmpfile);\
+    } else {\
+        _length = -1;\
     }
 
 #define swPackage_data(task) ((task->info.type==SW_EVENT_PACKAGE_END)?SwooleWG.buffer_input[task->info.from_id]->str:task->data)
@@ -651,6 +648,7 @@ void swServer_worker_onStart(swServer *serv);
 void swServer_worker_onStop(swServer *serv);
 
 int swWorker_create(swWorker *worker);
+int swWorker_onTask(swFactory *factory, swEventData *task);
 
 static sw_inline swConnection *swWorker_get_connection(swServer *serv, int fd)
 {
@@ -671,6 +669,7 @@ int swWorker_loop(swFactory *factory, int worker_pti);
 int swWorker_send2reactor(swEventData *ev_data, size_t sendn, int fd);
 int swWorker_send2worker(swWorker *dst_worker, void *buf, int n, int flag);
 void swWorker_signal_handler(int signo);
+void swWorker_clean(void);
 
 int swServer_master_onAccept(swReactor *reactor, swEvent *event);
 

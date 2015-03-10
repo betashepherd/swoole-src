@@ -8,7 +8,7 @@
  | http://www.apache.org/licenses/LICENSE-2.0.html                      |
  | If you did not receive a copy of the Apache2.0 license and are unable|
  | to obtain it through the world-wide-web, please send a note to       |
- | license@php.net so we can mail you a copy immediately.               |
+ | license@swoole.com so we can mail you a copy immediately.            |
  +----------------------------------------------------------------------+
  | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
  +----------------------------------------------------------------------+
@@ -80,7 +80,7 @@ void swoole_init(void)
         swError("[Master] Fatal Error: alloc memory for SwooleGS failed.");
     }
     SwooleStats = SwooleG.memory_pool->alloc(SwooleG.memory_pool, sizeof(swServerStats));
-    if (SwooleGS == NULL)
+    if (SwooleStats == NULL)
     {
         swError("[Master] Fatal Error: alloc memory for SwooleStats failed.");
     }
@@ -89,7 +89,7 @@ void swoole_init(void)
 
 void swoole_clean(void)
 {
-    //释放全局内存
+    //free the global memory
     if (SwooleG.memory_pool != NULL)
     {
         SwooleG.memory_pool->destroy(SwooleG.memory_pool);
@@ -221,6 +221,31 @@ int swoole_type_size(char type)
     default:
         return 0;
     }
+}
+
+char* swoole_dec2hex(int value, int base)
+{
+    assert(base > 1 && base < 37);
+
+    static char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+    char buf[(sizeof(unsigned long) << 3) + 1];
+    char *ptr, *end;
+
+    if (base < 2 || base > 36)
+    {
+        return NULL;
+    }
+
+    end = ptr = buf + sizeof(buf) - 1;
+    *ptr = '\0';
+
+    do
+    {
+        *--ptr = digits[value % base];
+        value /= base;
+    } while (ptr > buf && value);
+
+    return strndup(ptr, end - ptr);
 }
 
 int swoole_sync_writefile(int fd, void *data, int len)

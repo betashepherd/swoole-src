@@ -227,6 +227,11 @@ int swReactor_write(swReactor *reactor, int fd, void *buf, int n)
 
     if (swBuffer_empty(buffer))
     {
+        if (socket->fd == 0)
+        {
+            socket->fd = fd;
+        }
+
         do_receive:
         ret = swConnection_send(socket, buf, n, 0);
 
@@ -234,7 +239,11 @@ int swReactor_write(swReactor *reactor, int fd, void *buf, int n)
         {
             return ret;
         }
+#ifdef HAVE_KQUEUE
+        else if (errno == EAGAIN || errno == ENOBUFS)
+#else
         else if (errno == EAGAIN)
+#endif
         {
             if (!socket->out_buffer)
             {
@@ -251,11 +260,17 @@ int swReactor_write(swReactor *reactor, int fd, void *buf, int n)
 
             if (socket->events & SW_EVENT_READ)
             {
-                SwooleG.main_reactor->set(SwooleG.main_reactor, fd, socket->type | socket->events);
+                if (SwooleG.main_reactor->set(SwooleG.main_reactor, fd, socket->type | socket->events) < 0)
+                {
+                    swSysError("reactor->set(%d, SW_EVENT_WRITE) failed.", fd);
+                }
             }
             else
             {
-                SwooleG.main_reactor->add(SwooleG.main_reactor, fd, socket->type | socket->events);
+                if (SwooleG.main_reactor->add(SwooleG.main_reactor, fd, socket->type | socket->events) < 0)
+                {
+                    swSysError("reactor->add(%d, SW_EVENT_WRITE) failed.", fd);
+                }
             }
             goto append_pipe_buffer;
         }
@@ -331,21 +346,36 @@ int swReactor_onWrite(swReactor *reactor, swEvent *ev)
     //remove EPOLLOUT event
     if (swBuffer_empty(buffer))
     {
-        socket->events &= ~SW_EVENT_WRITE;
-
         if (socket->events & SW_EVENT_READ)
         {
-            ret = reactor->set(reactor, fd, socket->type | socket->events);
+            if (reactor->set(reactor, fd, socket->type | socket->events) < 0)
+            {
+                swSysError("reactor->set(%d, SW_EVENT_READ) failed.", fd);
+            }
         }
         else
         {
-            ret = reactor->del(reactor, fd);
+            if (reactor->del(reactor, fd) < 0)
+            {
+                swSysError("reactor->del(%d) failed.", fd);
+            }
         }
-        if (ret < 0)
-        {
-            swSysError("reactor->set() failed.");
-        }
+        socket->events &= ~SW_EVENT_WRITE;
     }
+
     return SW_OK;
 }
 
+int swReactor_wait_write_buffer(swReactor *reactor, int fd)
+{
+    swConnection *conn = swReactor_get(reactor, fd);
+    swEvent event;
+
+    if (conn->out_buffer)
+    {
+        swSetBlock(fd);
+        event.fd = fd;
+        return swReactor_onWrite(reactor, &event);
+    }
+    return SW_OK;
+}

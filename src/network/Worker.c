@@ -17,10 +17,7 @@
 #include "swoole.h"
 #include "Server.h"
 
-static int worker_task_num;
-
 static int swWorker_onPipeReceive(swReactor *reactor, swEvent *event);
-static int swRandom(int worker_pti);
 
 int swWorker_create(swWorker *worker)
 {
@@ -74,9 +71,9 @@ void swWorker_signal_handler(int signo)
     case SIGALRM:
         swTimer_signal_handler(SIGALRM);
         break;
-        /**
-         * for test
-         */
+    /**
+     * for test
+     */
     case SIGVTALRM:
         swWarn("SIGVTALRM coming");
         break;
@@ -88,17 +85,26 @@ void swWorker_signal_handler(int signo)
     }
 }
 
-static int swRandom(int worker_pti)
+static sw_inline int swWorker_get_session_id(swServer *serv, int fd)
 {
-    srand((int) time(0));
-    return rand() % 10 * worker_pti;
+    swConnection *conn = swServer_connection_get(serv, fd);
+    //socket is closed, discard package.
+    if (!conn || conn->closed || conn->session_id == 0)
+    {
+        swWarn("received the wrong data from socket#%d", fd);
+        return SW_ERR;
+    }
+#ifdef SW_REACTOR_USE_SESSION
+    return conn->session_id;
+#else
+    return fd;
+#endif
 }
 
-static sw_inline int swWorker_excute(swFactory *factory, swEventData *task)
+int swWorker_onTask(swFactory *factory, swEventData *task)
 {
     swServer *serv = factory->ptr;
     swString *package = NULL;
-    swConnection *conn = NULL;
 
     factory->last_from_id = task->info.from_id;
     //worker busy
@@ -106,30 +112,22 @@ static sw_inline int swWorker_excute(swFactory *factory, swEventData *task)
 
     switch (task->info.type)
     {
-    //no buffer
     case SW_EVENT_TCP:
-    case SW_EVENT_UDP:
-    case SW_EVENT_UNIX_DGRAM:
+    case SW_EVENT_PACKAGE_START:
     //ringbuffer shm package
     case SW_EVENT_PACKAGE:
-
-        do_task: if (swEventData_is_stream(task->info.type))
+        do_task:
+        task->info.fd = swWorker_get_session_id(serv, task->info.fd);
+        if (task->info.fd < 0)
         {
-            conn = swWorker_get_connection(serv, task->info.fd);
-            //socket is closed, discard package.
-            if (!conn || conn->closed)
-            {
-                swWarn("received the wrong data from socket#%d", task->info.fd);
-                break;
-            }
+            return SW_OK;
         }
 
         factory->onTask(factory, task);
-
         if (!SwooleWG.run_always)
         {
             //only onTask increase the count
-            worker_task_num--;
+            SwooleWG.request_num--;
         }
         if (task->info.type == SW_EVENT_PACKAGE_END)
         {
@@ -137,15 +135,12 @@ static sw_inline int swWorker_excute(swFactory *factory, swEventData *task)
         }
         break;
 
-    //package trunk
-    case SW_EVENT_PACKAGE_START:
     case SW_EVENT_PACKAGE_END:
         //input buffer
         package = SwooleWG.buffer_input[task->info.from_id];
         //merge data to package buffer
         memcpy(package->str + package->length, task->data, task->info.len);
         package->length += task->info.len;
-        //printf("package[%d]. from_id=%d|data_len=%d|total_length=%d\n", task->info.type, task->info.from_id, task->info.len, package->length);
         //package end
         if (task->info.type == SW_EVENT_PACKAGE_END)
         {
@@ -153,11 +148,30 @@ static sw_inline int swWorker_excute(swFactory *factory, swEventData *task)
         }
         break;
 
+    case SW_EVENT_UDP:
+    case SW_EVENT_UNIX_DGRAM:
+        factory->onTask(factory, task);
+        if (!SwooleWG.run_always)
+        {
+            SwooleWG.request_num--;
+        }
+        break;
+
     case SW_EVENT_CLOSE:
+        task->info.fd = swWorker_get_session_id(serv, task->info.fd);
+        if (task->info.fd < 0)
+        {
+            return SW_OK;
+        }
         factory->end(factory, task->info.fd);
         break;
 
     case SW_EVENT_CONNECT:
+        task->info.fd = swWorker_get_session_id(serv, task->info.fd);
+        if (task->info.fd < 0)
+        {
+            return SW_OK;
+        }
         serv->onConnect(serv, task->info.fd, task->info.from_id);
         break;
 
@@ -178,7 +192,7 @@ static sw_inline int swWorker_excute(swFactory *factory, swEventData *task)
     serv->workers[SwooleWG.id].status = SW_WORKER_IDLE;
 
     //stop
-    if (worker_task_num < 0)
+    if (SwooleWG.request_num < 0)
     {
         SwooleG.running = 0;
     }
@@ -199,6 +213,56 @@ void swWorker_onStart(swServer *serv)
     else
     {
         SwooleG.process_type = SW_PROCESS_WORKER;
+    }
+
+    int is_root = !geteuid();
+    struct passwd *passwd = NULL;
+    struct group *group = NULL;
+
+    if (is_root)
+    {
+        //get group info
+        if (SwooleG.group)
+        {
+            group = getgrnam(SwooleG.group);
+            if (!group)
+            {
+                swSysError("get group [%s] info failed.", SwooleG.group);
+            }
+        }
+        //get user info
+        if (SwooleG.user)
+        {
+            passwd = getpwnam(SwooleG.user);
+            if (!passwd)
+            {
+                swSysError("get user [%s] info failed.", SwooleG.user);
+            }
+        }
+        //chroot
+        if (SwooleG.chroot)
+        {
+            if (0 > chroot(SwooleG.chroot))
+            {
+                swSysError("chroot to [%s] failed.", SwooleG.chroot);
+            }
+        }
+        //set process group
+        if (SwooleG.group && group)
+        {
+            if (setgid(group->gr_gid) < 0)
+            {
+                swSysError("setgid to [%s] failed.", SwooleG.group);
+            }
+        }
+        //set process user
+        if (SwooleG.user && passwd)
+        {
+            if (setuid(passwd->pw_uid) < 0)
+            {
+                swSysError("setuid to [%s] failed.", SwooleG.user);
+            }
+        }
     }
 
     SwooleWG.worker = swServer_get_worker(serv, SwooleWG.id);
@@ -230,12 +294,31 @@ void swWorker_onStart(swServer *serv)
 void swWorker_onStop(swServer *serv)
 {
     swWorker *worker = swServer_get_worker(serv, SwooleWG.id);
-
     if (serv->onWorkerStop)
     {
         serv->onWorkerStop(serv, SwooleWG.id);
     }
     swWorker_free(worker);
+}
+
+void swWorker_clean(void)
+{
+    int i;
+    swServer *serv = SwooleG.serv;
+    swWorker *worker;
+
+    for (i = 0; i < serv->worker_num + SwooleG.task_worker_num; i++)
+    {
+        worker = swServer_get_worker(serv, i);
+        if (worker->pipe_worker)
+        {
+            swReactor_wait_write_buffer(SwooleG.main_reactor, worker->pipe_worker);
+        }
+        if (worker->pipe_master)
+        {
+            swReactor_wait_write_buffer(SwooleG.main_reactor, worker->pipe_master);
+        }
+    }
 }
 
 /**
@@ -279,19 +362,6 @@ int swWorker_loop(swFactory *factory, int worker_id)
     SwooleG.main_reactor->setHandle(SwooleG.main_reactor, SW_FD_PIPE, swWorker_onPipeReceive);
     SwooleG.main_reactor->setHandle(SwooleG.main_reactor, SW_FD_PIPE | SW_FD_WRITE, swReactor_onWrite);
 
-    if (serv->max_request < 1)
-    {
-        SwooleWG.run_always = 1;
-    }
-    else
-    {
-        worker_task_num = serv->max_request;
-        if (worker_task_num > 10)
-        {
-            worker_task_num += swRandom(worker_id);
-        }
-    }
-
     swWorker_onStart(serv);
 
 #ifdef HAVE_SIGNALFD
@@ -300,8 +370,11 @@ int swWorker_loop(swFactory *factory, int worker_id)
         swSignalfd_setup(SwooleG.main_reactor);
     }
 #endif
+    //main loop
     SwooleG.main_reactor->wait(SwooleG.main_reactor, NULL);
-
+    //clear pipe buffer
+    swWorker_clean();
+    //worker shutdown
     swWorker_onStop(serv);
     return SW_OK;
 }
@@ -349,7 +422,7 @@ static int swWorker_onPipeReceive(swReactor *reactor, swEvent *event)
 
     if (read(event->fd, &task, sizeof(task)) > 0)
     {
-        ret = swWorker_excute(factory, &task);
+        ret = swWorker_onTask(factory, &task);
 #ifndef SW_WORKER_RECV_AGAIN
         /**
          * Big package
@@ -385,31 +458,28 @@ int swWorker_send2worker(swWorker *dst_worker, void *buf, int n, int flag)
         pipefd = dst_worker->pipe_worker;
     }
 
-    if (flag & SW_PIPE_NONBLOCK)
+    //message-queue
+    if (dst_worker->pool->use_msgqueue)
+    {
+        struct
+        {
+            long mtype;
+            swEventData buf;
+        } msg;
+
+        msg.mtype = dst_worker->id + 1;
+        memcpy(&msg.buf, buf, n);
+
+        return dst_worker->pool->queue->in(dst_worker->pool->queue, (swQueue_data *) &msg, n);
+    }
+
+    if ((flag & SW_PIPE_NONBLOCK) && SwooleG.main_reactor)
     {
         return SwooleG.main_reactor->write(SwooleG.main_reactor, pipefd, buf, n);
     }
     else
     {
-        //message-queue
-        if (dst_worker->pool->use_msgqueue)
-        {
-            struct
-            {
-                long mtype;
-                swEventData buf;
-            } msg;
-
-            msg.mtype = dst_worker->id + 1;
-            memcpy(&msg.buf, buf, n);
-
-            ret = dst_worker->pool->queue->in(dst_worker->pool->queue, (swQueue_data *) &msg, n);
-        }
-        //task worker
-        else
-        {
-            ret = swSocket_write_blocking(pipefd, buf, n);
-        }
+        ret = swSocket_write_blocking(pipefd, buf, n);
     }
 
     return ret;

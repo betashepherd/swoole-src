@@ -8,7 +8,7 @@
   | http://www.apache.org/licenses/LICENSE-2.0.html                      |
   | If you did not receive a copy of the Apache2.0 license and are unable|
   | to obtain it through the world-wide-web, please send a note to       |
-  | license@php.net so we can mail you a copy immediately.               |
+  | license@swoole.com so we can mail you a copy immediately.            |
   +----------------------------------------------------------------------+
   | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
   +----------------------------------------------------------------------+
@@ -22,6 +22,7 @@
 #define SW_MAX_FILE_CONTENT        (64*1024*1024) //for swoole_file_get_contents
 
 #define SW_USE_EVENT_TIMER
+//#define SW_USE_RINGBUFFER
 
 //#define SW_DEBUG_REMOTE_OPEN
 #define SW_DEBUG_SERVER_HOST       "127.0.0.1"
@@ -116,6 +117,7 @@
 #define SW_REACTOR_MINEVENTS             128
 #define SW_REACTOR_MAXEVENTS             4096
 #define SW_REACTOR_USE_SESSION
+
 /**
  * 最大Reactor线程数量，默认会启动CPU核数的线程数
  * 如果超过8核，默认启动8个线程
@@ -138,7 +140,6 @@
 #define SW_RINGQUEUE_LEN                 1024           //RingQueue队列长度
 #define SW_RINGQUEUE_MEMSIZE             (1024*1024*4)  //内存区大小,默认分配4M的内存
 
-
 //#define SW_USE_RINGQUEUE_TS            1     //使用线程安全版本的RingQueue
 #define SW_RINGBUFFER_COLLECT_N          100   //collect max_count
 #define SW_RINGBUFFER_FREE_N_MAX         4     //when free_n > MAX, execute collect
@@ -148,7 +149,6 @@
 /**
  * ringbuffer memory pool size
  */
-#define SW_REACTOR_RINGBUFFER_SIZE       (1024*1024*4)
 #define SW_BUFFER_OUTPUT_SIZE            (1024*1024*2)
 #define SW_BUFFER_INPUT_SIZE             (1024*1024*2)
 
@@ -176,8 +176,8 @@
 #define SW_USE_EVENTFD                   //是否使用eventfd来做消息通知，需要Linux 2.6.22以上版本才会支持
 
 #define SW_TASK_TMP_FILE                 "/tmp/swoole.task.XXXXXX"
+#define SW_TASK_TMPDIR_SIZE              128
 
-#define SW_DIR_MAXLEN                    128
 #define SW_FILE_CHUNK_SIZE               65536
 
 #define SW_TABLE_CONFLICT_PROPORTION     0.2 //20%
@@ -200,5 +200,10 @@
 #define SW_HTTP_BAD_REQUEST              "<h1>400 Bad Request</h1>\r\n"
 #define SW_HTTP_PARAM_MAX_NUM            128
 #define SW_HTTP_COOKIE_KEYLEN            128
+#define SW_HTTP_HEADER_INIT_SIZE         1024
+
+#define SW_WEBSOCKET_SERVER_SOFTWARE     "swoole-websocket-server"
+#define SW_WEBSOCKET_VERSION             "13"
+
 
 #endif /* SWOOLE_CONFIG_H_ */

@@ -95,12 +95,17 @@ static int swEventTimer_add(swTimer *timer, int _msec, int interval, void *data)
 static void* swEventTimer_del(swTimer *timer, int _msec, int id)
 {
     swTimer_node *del = swTimer_node_find(&timer->root, _msec, id);
-    if (!del)
+    if (del)
+    {
+        del->remove = 1;
+        void *data = del->data;
+        del->data = NULL;
+        return data;
+    }
+    else
     {
         return NULL;
     }
-    del->remove = 1;
-    return del->data;
 }
 
 static int swEventTimer_select(swTimer *timer)
@@ -122,13 +127,16 @@ static int swEventTimer_select(swTimer *timer)
         }
         else
         {
-            if (tmp->interval > 0)
+            if (!tmp->remove)
             {
-                timer->onTimer(timer, tmp);
-            }
-            else if (!tmp->remove)
-            {
-                timer->onTimeout(timer, tmp);
+                if (tmp->interval > 0)
+                {
+                    timer->onTimer(timer, tmp);
+                }
+                else
+                {
+                    timer->onTimeout(timer, tmp);
+                }
             }
 
             timer->root = tmp->next;

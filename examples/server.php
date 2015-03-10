@@ -8,8 +8,11 @@ $config = array(
    'worker_num' => 1,
     //'open_eof_check' => true,
     //'package_eof' => "\r\n",
-    //'ipc_mode' => 2,
+   'task_ipc_mode'   => 2,
    'task_worker_num' => 1,
+   'user' => 'www-data',
+   'group' => 'www-data',
+   'chroot' => '/opt/tmp',
     //'task_ipc_mode' => 1,
     //'dispatch_mode' => 1,
     //'log_file' => '/tmp/swoole.log',
@@ -24,7 +27,7 @@ if (isset($argv[1]) and $argv[1] == 'daemon') {
 	$config['daemonize'] = false;
 }
 
-// $mode = SWOOLE_BASE;
+//$mode = SWOOLE_BASE;
 $mode = SWOOLE_PROCESS;
 
 $serv = new swoole_server("0.0.0.0", 9501, $mode);
@@ -144,11 +147,12 @@ function my_onConnect(swoole_server $serv, $fd, $from_id)
     //throw new Exception("hello world");
     var_dump($serv->connection_info($fd));
     echo "Worker#{$serv->worker_pid} Client[$fd@$from_id]: Connect.\n";
+    echo "Client: Connect --- {$fd}\n";
 }
 
 function my_onWorkerStart($serv, $worker_id)
 {
-	//processRename($serv, $worker_id);
+	processRename($serv, $worker_id);
 	//forkChildInWorker();
 	//setTimerInWorker($serv, $worker_id);
 }
@@ -183,6 +187,10 @@ function my_onReceive(swoole_server $serv, $fd, $from_id, $data)
     {
         $serv->task("hellotask");
     }
+    elseif ($cmd == "sendto")
+    {
+        $serv->sendto("127.0.0.1", 9999, "hello world");
+    }
     elseif($cmd == "close")
     {
         $serv->send($fd, "close connection\n");
@@ -192,6 +200,22 @@ function my_onReceive(swoole_server $serv, $fd, $from_id, $data)
     {
         $info = $serv->connection_info($fd);
         $serv->send($fd, 'Info: '.var_export($info, true).PHP_EOL);
+    }
+    elseif($cmd == "list")
+    {
+        $start_fd = 0;
+        echo "broadcast\n";
+        while(true)
+        {
+            $conn_list = $serv->connection_list($start_fd, 10);
+            if (empty($conn_list))
+            {
+                echo "iterates finished\n";
+                break;
+            }
+            $start_fd = end($conn_list);
+            var_dump($conn_list);
+        }
     }
     elseif($cmd == "stats")
     {
@@ -206,6 +230,10 @@ function my_onReceive(swoole_server $serv, $fd, $from_id, $data)
     elseif($cmd == "error")
     {
         hello_no_exists();
+    }
+    elseif($cmd == "exit")
+    {
+        exit("worker php exit.\n");
     }
     //关闭fd
     elseif(substr($cmd, 0, 5) == "close")
@@ -242,13 +270,15 @@ function my_onTask(swoole_server $serv, $task_id, $from_id, $data)
     }
     else
     {
+//        $serv->sendto('127.0.0.1', 9999, "hello world");
         //swoole_timer_after(1000, "test");
-        var_dump($data);
+//        var_dump($data);
         $fd = str_replace('task-', '', $data);
-        $serv->send($fd, str_repeat('A', 8192 * 2));
-        $serv->send($fd, str_repeat('B', 8192 * 2));
-        $serv->send($fd, str_repeat('C', 8192 * 2));
-        $serv->send($fd, str_repeat('D', 8192 * 2));
+        $serv->send($fd, "hello world in taskworker.");
+//        $serv->send($fd, str_repeat('A', 8192 * 2));
+//        $serv->send($fd, str_repeat('B', 8192 * 2));
+//        $serv->send($fd, str_repeat('C', 8192 * 2));
+//        $serv->send($fd, str_repeat('D', 8192 * 2));
         return;
     }
 

@@ -8,7 +8,7 @@
   | http://www.apache.org/licenses/LICENSE-2.0.html                      |
   | If you did not receive a copy of the Apache2.0 license and are unable|
   | to obtain it through the world-wide-web, please send a note to       |
-  | license@php.net so we can mail you a copy immediately.               |
+  | license@swoole.com so we can mail you a copy immediately.            |
   +----------------------------------------------------------------------+
   | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
   +----------------------------------------------------------------------+
@@ -28,7 +28,6 @@
 #include "zend_exceptions.h"
 #include "zend_variables.h"
 
-#include <ext/spl/spl_iterators.h>
 #include <ext/standard/info.h>
 
 #ifdef HAVE_CONFIG_H
@@ -40,7 +39,7 @@
 #include "Client.h"
 #include "async.h"
 
-#define PHP_SWOOLE_VERSION  "1.7.10-rc3"
+#define PHP_SWOOLE_VERSION  "1.7.11"
 #define PHP_SWOOLE_CHECK_CALLBACK
 
 /**
@@ -56,24 +55,17 @@
 
 #define SW_HOST_SIZE  128
 
-#pragma pack(4)
 typedef struct
 {
-	uint16_t port;
-	uint16_t from_fd;
+    uint16_t port;
+    uint16_t from_fd;
 } php_swoole_udp_t;
-#pragma pack()
-
-typedef struct
-{
-    zval *callback;
-    int interval;
-} swoole_timer_item;
 
 typedef struct _swTimer_callback
 {
-	zval* callback;
-	zval* data;
+    zval* callback;
+    zval* data;
+    int interval;
 } swTimer_callback;
 
 extern zend_module_entry swoole_module_entry;
@@ -247,7 +239,6 @@ extern zend_class_entry *swoole_http_server_class_entry_ptr;
 
 extern zval *php_sw_callback[PHP_SERVER_CALLBACK_NUM];
 
-extern HashTable php_sw_timer_callback;
 extern HashTable php_sw_long_connections;
 extern HashTable php_sw_aio_callback;
 
@@ -273,7 +264,6 @@ PHP_FUNCTION(swoole_server_on);
 PHP_FUNCTION(swoole_server_handler);
 PHP_FUNCTION(swoole_server_addlisten);
 PHP_FUNCTION(swoole_server_addtimer);
-PHP_FUNCTION(swoole_server_deltimer);
 PHP_FUNCTION(swoole_server_gettimer);
 PHP_FUNCTION(swoole_server_task);
 PHP_FUNCTION(swoole_server_taskwait);
@@ -361,30 +351,33 @@ PHP_METHOD(swoole_table, column);
 PHP_METHOD(swoole_table, create);
 PHP_METHOD(swoole_table, set);
 PHP_METHOD(swoole_table, get);
+PHP_METHOD(swoole_table, del);
+PHP_METHOD(swoole_table, lock);
+PHP_METHOD(swoole_table, unlock);
+PHP_METHOD(swoole_table, count);
+
+#ifdef HAVE_PCRE
 PHP_METHOD(swoole_table, rewind);
 PHP_METHOD(swoole_table, next);
 PHP_METHOD(swoole_table, current);
 PHP_METHOD(swoole_table, key);
 PHP_METHOD(swoole_table, valid);
-PHP_METHOD(swoole_table, count);
-PHP_METHOD(swoole_table, del);
-PHP_METHOD(swoole_table, lock);
-PHP_METHOD(swoole_table, unlock);
+#endif
 
 PHP_METHOD(swoole_http_server, on);
 PHP_METHOD(swoole_http_server, start);
-PHP_METHOD(swoole_http_server, setGlobal);
-PHP_METHOD(swoole_http_server, push);
-
+PHP_METHOD(swoole_http_server, setglobal);
 PHP_METHOD(swoole_http_request, rawcontent);
 
+PHP_METHOD(swoole_http_response, write);
 PHP_METHOD(swoole_http_response, end);
 PHP_METHOD(swoole_http_response, cookie);
 PHP_METHOD(swoole_http_response, rawcookie);
 PHP_METHOD(swoole_http_response, header);
 PHP_METHOD(swoole_http_response, status);
 
-PHP_METHOD(swoole_websocket_frame, message);
+PHP_METHOD(swoole_websocket_server, on);
+PHP_METHOD(swoole_websocket_server, push);
 
 void swoole_destory_lock(zend_resource *rsrc TSRMLS_DC);
 void swoole_destory_process(zend_resource *rsrc TSRMLS_DC);
@@ -395,6 +388,7 @@ void swoole_async_init(int module_number TSRMLS_DC);
 void swoole_table_init(int module_number TSRMLS_DC);
 void swoole_client_init(int module_number TSRMLS_DC);
 void swoole_http_init(int module_number TSRMLS_DC);
+void swoole_websocket_init(int module_number TSRMLS_DC);
 void swoole_event_init(void);
 
 int php_swoole_process_start(swWorker *process, zval *object TSRMLS_DC);

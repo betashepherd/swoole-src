@@ -404,7 +404,7 @@ void swTimer_node_insert(swTimer_node **root, swTimer_node *new_node)
     swTimer_node *tmp = *root;
     while (1)
     {
-        if (tmp->exec_msec >= new_node->exec_msec)
+        if (tmp->exec_msec > new_node->exec_msec)
         {
             new_node->prev = tmp->prev;
             new_node->next = tmp;
@@ -439,9 +439,19 @@ swTimer_node* swTimer_node_find(swTimer_node **root, int interval_msec, int id)
     swTimer_node *tmp = *root;
     while (tmp)
     {
-        if ((interval_msec > 0 && tmp->interval == interval_msec) || (id > 0 && tmp->id == id))
+        if (interval_msec < 0)
         {
-            return tmp;
+            if (tmp->id == id)
+            {
+                return tmp;
+            }
+        }
+        else
+        {
+            if (tmp->interval == interval_msec)
+            {
+                return tmp;
+            }
         }
         tmp = tmp->next;
     }

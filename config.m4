@@ -1,6 +1,21 @@
 dnl $Id$
 dnl config.m4 for extension swoole
 
+dnl  +----------------------------------------------------------------------+
+dnl  | Swoole                                                               |
+dnl  +----------------------------------------------------------------------+
+dnl  | This source file is subject to version 2.0 of the Apache license,    |
+dnl  | that is bundled with this package in the file LICENSE, and is        |
+dnl  | available through the world-wide-web at the following url:           |
+dnl  | http://www.apache.org/licenses/LICENSE-2.0.html                      |
+dnl  | If you did not receive a copy of the Apache2.0 license and are unable|
+dnl  | to obtain it through the world-wide-web, please send a note to       |
+dnl  | license@swoole.com so we can mail you a copy immediately.            |
+dnl  +----------------------------------------------------------------------+
+dnl  | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
+dnl  +----------------------------------------------------------------------+
+
+
 dnl Comments in this file start with the string 'dnl'.
 dnl Remove where necessary. This file will not work
 dnl without editing.
@@ -150,6 +165,8 @@ if test "$PHP_SWOOLE" != "no"; then
     AC_CHECK_LIB(pthread, pthread_spin_lock, AC_DEFINE(HAVE_SPINLOCK, 1, [have pthread_spin_lock]))
 	AC_CHECK_LIB(pthread, pthread_mutex_timedlock, AC_DEFINE(HAVE_MUTEX_TIMEDLOCK, 1, [have pthread_mutex_timedlock]))
     AC_CHECK_LIB(ssl, SSL_library_init, AC_DEFINE(HAVE_OPENSSL, 1, [have openssl]))
+    AC_CHECK_LIB(pcre, pcre_compile, AC_DEFINE(HAVE_PCRE, 1, [have pcre]))
+
 
     if test `uname` = "Darwin" ; then
         AC_CHECK_LIB(c, clock_gettime, AC_DEFINE(HAVE_CLOCK_GETTIME, 1, [have clock_gettime]))
@@ -174,12 +191,14 @@ if test "$PHP_SWOOLE" != "no"; then
         swoole_lock.c \
         swoole_client.c \
         swoole_event.c \
+        swoole_timer.c \
         swoole_async.c \
         swoole_process.c \
         swoole_buffer.c \
         swoole_table.c \
         swoole_http.c \
-        src/core/Base.c \
+        swoole_websocket.c \
+        src/core/base.c \
         src/core/log.c \
         src/core/hashmap.c \
         src/core/RingQueue.c \
