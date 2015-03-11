@@ -374,7 +374,7 @@ int swReactorThread_send(swSendData *_send)
     swConnection *conn = swServer_connection_get(serv, fd);
     if (!conn)
     {
-        swWarn("send to socket#%d failed, the connection is closed.", session_id);
+        swWarn("send to socket#%d[session_id=%d] failed, the connection is closed.", fd, session_id);
         return SW_ERR;
     }
     if (session->id != session_id || conn->session_id != session_id)
@@ -397,12 +397,10 @@ int swReactorThread_send(swSendData *_send)
         return SW_ERR;
     }
 
-    swBuffer_trunk *trunk;
     swReactor *reactor = &(serv->reactor_threads[conn->from_id].reactor);
 
     swTraceLog(SW_TRACE_EVENT, "send-data. fd=%d|reactor_id=%d", fd, reactor_id);
-
-    if (conn->direct_send && conn->out_buffer == NULL)
+    if (conn->out_buffer == NULL)
     {
         /**
         * close connection.
@@ -413,65 +411,62 @@ int swReactorThread_send(swSendData *_send)
             reactor->close(reactor, fd);
             return SW_OK;
         }
-
-        //direct send
+#ifdef SW_REACTOR_SYNC_SEND
+        //Direct send
         if (_send->info.type != SW_EVENT_SENDFILE)
         {
+            int n;
+
             direct_send:
+            n = swConnection_send(conn, _send->data, _send->length, 0);
+            if (n == _send->length)
             {
-                if (conn->removed)
-                {
-                    swWarn("the connection#%d is closed by client.", fd);
-                    return SW_ERR;
-                }
-                int n = swConnection_send(conn, _send->data, _send->length, 0);
-                if (n == _send->length)
-                {
-                    return SW_OK;
-                }
-                else if (n > 0)
-                {
-                    _send->data += n;
-                    _send->length -= n;
-                }
-                else
-                {
-                    if (swConnection_error(errno) == SW_CLOSE)
-                    {
-                        conn->close_wait = 1;
-                        return SW_OK;
-                    }
-                    else if (errno == EINTR)
-                    {
-                        goto direct_send;
-                    }
-                }
+                return SW_OK;
+            }
+            else if (n > 0)
+            {
+                _send->data += n;
+                _send->length -= n;
+                goto buffer_send;
+            }
+            else if (errno == EINTR)
+            {
+                goto direct_send;
+            }
+            else
+            {
+                goto buffer_send;
+            }
+        }
+#endif
+        //buffer send
+        else
+        {
+#ifdef SW_REACTOR_SYNC_SEND
+            buffer_send:
+#endif
+            conn->out_buffer = swBuffer_new(SW_BUFFER_SIZE);
+            if (conn->out_buffer == NULL)
+            {
+                return SW_ERR;
             }
         }
     }
 
-    if (conn->out_buffer == NULL)
+    //listen EPOLLOUT event
+    if (reactor->set(reactor, fd, SW_EVENT_TCP | SW_EVENT_WRITE | SW_EVENT_READ) < 0 && (errno == EBADF || errno == ENOENT))
     {
-        conn->out_buffer = swBuffer_new(SW_BUFFER_SIZE);
-        if (conn->out_buffer == NULL)
-        {
-            return SW_ERR;
-        }
-        //listen EPOLLOUT event
-        if (reactor->set(reactor, fd, SW_EVENT_TCP | SW_EVENT_WRITE | SW_EVENT_READ) < 0
-                && (errno == EBADF || errno == ENOENT))
-        {
-            goto close_fd;
-        }
+        goto close_fd;
     }
 
+    swBuffer_trunk *trunk;
     //close connection
     if (_send->info.type == SW_EVENT_CLOSE)
     {
         trunk = swBuffer_new_trunk(conn->out_buffer, SW_CHUNK_CLOSE, 0);
         trunk->store.data.val1 = _send->info.type;
     }
-    //sendfile to client
+        //sendfile to client
     else if (_send->info.type == SW_EVENT_SENDFILE)
     {
         swConnection_sendfile(conn, _send->data);
@@ -479,16 +474,19 @@ int swReactorThread_send(swSendData *_send)
     //send data
     else
     {
+        //connection is closed
         if (conn->removed)
         {
             swWarn("the connection#%d is closed by client.", fd);
             return SW_ERR;
         }
+        //connection output buffer overflow
         if (conn->out_buffer->length >= serv->buffer_output_size)
         {
             swWarn("Connection output buffer overflow.");
             conn->overflow = 1;
         }
+        //buffer enQueue
         swBuffer_append(conn->out_buffer, _send->data, _send->length);
     }
     return SW_OK;
@@ -626,6 +624,7 @@ static int swReactorThread_onWrite(swReactor *reactor, swEvent *ev)
     if (swBuffer_empty(conn->out_buffer))
     {
         reactor->set(reactor, fd, SW_FD_TCP | SW_EVENT_READ);
+        conn->direct_send = 1;
     }
     return SW_OK;
 }
