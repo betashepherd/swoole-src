@@ -26,6 +26,8 @@
 #define MSG_NOSIGNAL        0
 #endif
 
+static char *str_ptr = NULL;
+
 int swConnection_onSendfile(swConnection *conn, swBuffer_trunk *chunk)
 {
     int ret;
@@ -168,6 +170,43 @@ swString* swConnection_get_string_buffer(swConnection *conn)
     else
     {
         return buffer;
+    }
+}
+
+char* swConnection_get_ip(swConnection *conn)
+{
+    if (conn->socket_type == SW_SOCK_TCP)
+    {
+        return inet_ntoa(conn->info.addr.inet_v4.sin_addr);
+    }
+    else
+    {
+        if (str_ptr)
+        {
+            free(str_ptr);
+        }
+        char tmp[INET6_ADDRSTRLEN];
+        if (inet_ntop(AF_INET6, &conn->info.addr.inet_v6.sin6_addr, tmp, sizeof(tmp)) == NULL)
+        {
+            return NULL;
+        }
+        else
+        {
+            str_ptr = strdup(tmp);
+            return str_ptr;
+        }
+    }
+}
+
+int swConnection_get_port(swConnection *conn)
+{
+    if (conn->socket_type == SW_SOCK_TCP)
+    {
+        return ntohs(conn->info.addr.inet_v4.sin_port);
+    }
+    else
+    {
+        return ntohs(conn->info.addr.inet_v6.sin6_port);
     }
 }
 

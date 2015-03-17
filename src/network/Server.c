@@ -37,9 +37,9 @@ static sw_inline void swServer_reactor_schedule(swServer *serv)
 #endif
 
 static int swServer_start_check(swServer *serv);
-
 static void swServer_signal_hanlder(int sig);
 static int swServer_start_proxy(swServer *serv);
+static void swServer_disable_accept(swReactor *reactor);
 
 static void swHeartbeatThread_start(swServer *serv);
 static void swHeartbeatThread_loop(swThreadParam *param);
@@ -55,20 +55,51 @@ __thread swThreadG SwooleTG;
 int16_t sw_errno;
 char sw_error[SW_ERROR_MSG_SIZE];
 
+static void swServer_disable_accept(swReactor *reactor)
+{
+    swListenList_node *ls;
+
+    LL_FOREACH(SwooleG.serv->listen_list, ls)
+    {
+        //UDP
+        if (ls->type == SW_SOCK_UDP || ls->type == SW_SOCK_UDP6 || ls->type == SW_SOCK_UNIX_DGRAM)
+        {
+            continue;
+        }
+        reactor->del(reactor, ls->sock);
+    }
+}
+
+void swServer_enable_accept(swReactor *reactor)
+{
+    swListenList_node *ls;
+
+    LL_FOREACH(SwooleG.serv->listen_list, ls)
+    {
+        //UDP
+        if (ls->type == SW_SOCK_UDP || ls->type == SW_SOCK_UDP6 || ls->type == SW_SOCK_UNIX_DGRAM)
+        {
+            continue;
+        }
+        reactor->add(reactor, ls->sock, SW_FD_LISTEN);
+    }
+}
+
 int swServer_master_onAccept(swReactor *reactor, swEvent *event)
 {
     swServer *serv = reactor->ptr;
     swReactor *sub_reactor;
-    struct sockaddr_in client_addr;
+    swSocketAddress client_addr;
     socklen_t client_addrlen = sizeof(client_addr);
+    swListenList_node *listen_host = serv->connection_list[event->fd].object;
+
     int new_fd, ret, reactor_id = 0, i;
 
     //SW_ACCEPT_AGAIN
     for (i = 0; i < SW_ACCEPT_MAX_COUNT; i++)
     {
-        //accept得到连接套接字
-#ifdef SW_USE_ACCEPT4
-        new_fd = accept4(event->fd, (struct sockaddr *)&client_addr, &client_addrlen, SOCK_NONBLOCK | SOCK_CLOEXEC);
+#ifdef HAVE_ACCEPT4
+        new_fd = accept4(event->fd, (struct sockaddr *) &client_addr, &client_addrlen, SOCK_NONBLOCK | SOCK_CLOEXEC);
 #else
         new_fd = accept(event->fd, (struct sockaddr *) &client_addr, &client_addrlen);
 #endif
@@ -81,6 +112,11 @@ int swServer_master_onAccept(swReactor *reactor, swEvent *event)
             case EINTR:
                 continue;
             default:
+                if (errno == EMFILE || errno == ENFILE)
+                {
+                    swServer_disable_accept(reactor);
+                    reactor->disable_accept = 1;
+                }
                 swWarn("accept() failed. Error: %s[%d]", strerror(errno), errno);
                 return SW_OK;
             }
@@ -113,39 +149,13 @@ int swServer_master_onAccept(swReactor *reactor, swEvent *event)
 
 		//add to connection_list
         swConnection *conn = swServer_connection_new(serv, new_fd, event->fd, reactor_id);
-        memcpy(&conn->addr, &client_addr, sizeof(client_addr));
+        memcpy(&conn->info.addr, &client_addr, sizeof(client_addr));
         sub_reactor = &serv->reactor_threads[reactor_id].reactor;
-
-#ifdef SW_REACTOR_USE_SESSION
-        uint32_t session_id = 1;
-        swSession *session;
-
-        //get session id
-        for (i = 0; i < serv->max_connection; i++)
-        {
-            session_id = (serv->session_round++) % SW_MAX_SOCKET_ID;
-            if (session_id == 0)
-            {
-                session_id = 1;
-                serv->session_round++;
-            }
-
-            session = &serv->session_list[session_id % serv->max_connection];
-            //vacancy
-            if (session->fd == 0)
-            {
-                session->fd = new_fd;
-                session->id = session_id;
-                break;
-            }
-        }
-        conn->session_id = session_id;
-#endif
+        conn->socket_type = listen_host->type;
 
 #ifdef SW_USE_OPENSSL
 		if (serv->open_ssl)
 		{
-			swListenList_node *listen_host = serv->connection_list[event->fd].object;
 			if (listen_host->ssl)
 			{
 				if (swSSL_create(conn, 0) < 0)
@@ -160,20 +170,40 @@ int swServer_master_onAccept(swReactor *reactor, swEvent *event)
 			}
 		}
 #endif
-
         /*
          * [!!!] new_connection function must before reactor->add
          */
-        if (serv->factory_mode == SW_MODE_PROCESS && serv->onConnect)
+        if (serv->factory_mode == SW_MODE_PROCESS)
         {
-            conn->connect_notify = 1;
-            ret = sub_reactor->add(sub_reactor, new_fd, SW_FD_TCP | SW_EVENT_WRITE);
+            int events;
+            if (serv->onConnect)
+            {
+                conn->connect_notify = 1;
+                events = SW_EVENT_WRITE;
+            }
+            else
+            {
+                events = SW_EVENT_READ;
+            }
+            ret = sub_reactor->add(sub_reactor, new_fd, SW_FD_TCP | events);
         }
         else
         {
             ret = sub_reactor->add(sub_reactor, new_fd, SW_FD_TCP | SW_EVENT_READ);
-        }
+            
+            if (ret >= 0 && serv->onConnect)
+            {
+                swDataHead connect_event;
+                connect_event.type = SW_EVENT_CONNECT;
+                connect_event.from_id = reactor->id;
+                connect_event.fd = new_fd;
 
+                if (serv->factory.notify(&serv->factory, &connect_event) < 0)
+                {
+                    swWarn("send notification [fd=%d] failed.", new_fd);
+                }
+            }
+        }
         if (ret < 0)
         {
             bzero(conn, sizeof(swConnection));
@@ -277,7 +307,9 @@ static int swServer_start_proxy(swServer *serv)
 	}
 
     main_reactor->thread = 1;
-    main_reactor->socket_list = serv->connection_list;
+    main_reactor->socket_list = serv->connection_list;    
+    main_reactor->disable_accept = 0;
+    main_reactor->enable_accept = swServer_enable_accept;
 
 #ifdef HAVE_SIGNALFD
     if (SwooleG.use_signalfd)
@@ -906,23 +938,29 @@ int swServer_add_worker(swServer *serv, swWorker *worker)
     return worker->id;
 }
 
-int swServer_addListener(swServer *serv, int type, char *host, int port)
+int swServer_add_listener(swServer *serv, int type, char *host, int port)
 {
-	swListenList_node *listen_host = SwooleG.memory_pool->alloc(SwooleG.memory_pool, sizeof(swListenList_node));
+    if (serv->listen_port_num >= SW_MAX_LISTEN_PORT)
+    {
+        swWarn("allows up to %d ports to listen", SW_MAX_LISTEN_PORT);
+        return SW_ERR;
+    }
 
-    listen_host->type = type;
-    listen_host->port = port;
-    listen_host->sock = 0;
-    listen_host->ssl = 0;
+    swListenList_node *ls = SwooleG.memory_pool->alloc(SwooleG.memory_pool, sizeof(swListenList_node));
 
-    bzero(listen_host->host, SW_HOST_MAXSIZE);
-    strncpy(listen_host->host, host, SW_HOST_MAXSIZE);
-    LL_APPEND(serv->listen_list, listen_host);
+    ls->type = type;
+    ls->port = port;
+    ls->sock = 0;
+    ls->ssl = 0;
 
-	//UDP需要提前创建好
+    bzero(ls->host, SW_HOST_MAXSIZE);
+    strncpy(ls->host, host, SW_HOST_MAXSIZE);
+    LL_APPEND(serv->listen_list, ls);
+
+    //UDP需要提前创建好
     if (type == SW_SOCK_UDP || type == SW_SOCK_UDP6 || type == SW_SOCK_UNIX_DGRAM)
     {
-        int sock = swSocket_listen(type, listen_host->host, port, serv->backlog);
+        int sock = swSocket_listen(type, ls->host, port, serv->backlog);
         if (sock < 0)
         {
             return SW_ERR;
@@ -932,29 +970,36 @@ int swServer_addListener(swServer *serv, int type, char *host, int port)
         setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
         setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
 
-        listen_host->sock = sock;
+        ls->sock = sock;
+        ls->type = type;
         serv->have_udp_sock = 1;
-        if (type == SW_SOCK_UDP || type == SW_SOCK_UDP6)
+
+        if (type == SW_SOCK_UDP)
         {
-            serv->dgram_socket_fd = sock;
+            serv->udp_socket_ipv4 = sock;
+        }
+        else if (type == SW_SOCK_UDP6)
+        {
+            serv->udp_socket_ipv6 = sock;
         }
     }
-	else
-	{
-		if (type & SW_SOCK_SSL)
-		{
-			type = type & (~SW_SOCK_SSL);
-			listen_host->type = type;
-			listen_host->ssl = 1;
-		}
-		if (type != SW_SOCK_UNIX_STREAM && port <= 0)
-		{
-			swError("listen port must greater than 0.");
-			return SW_ERR;
-		}
-		serv->have_tcp_sock = 1;
-	}
-	return SW_OK;
+    else
+    {
+        if (type & SW_SOCK_SSL)
+        {
+            type = type & (~SW_SOCK_SSL);
+            ls->type = type;
+            ls->ssl = 1;
+        }
+        if (type != SW_SOCK_UNIX_STREAM && port <= 0)
+        {
+            swError("listen port must greater than 0.");
+            return SW_ERR;
+        }
+        serv->have_tcp_sock = 1;
+    }
+    serv->listen_port_num++;
+    return SW_OK;
 }
 
 /**
@@ -965,19 +1010,18 @@ int swServer_listen(swServer *serv, swReactor *reactor)
 {
     int sock = -1, sockopt;
 
-    swListenList_node *listen_host;
+    swListenList_node *ls;
 
-    LL_FOREACH(serv->listen_list, listen_host)
+    LL_FOREACH(serv->listen_list, ls)
     {
         //UDP
-        if (listen_host->type == SW_SOCK_UDP || listen_host->type == SW_SOCK_UDP6
-                || listen_host->type == SW_SOCK_UNIX_DGRAM)
+        if (ls->type == SW_SOCK_UDP || ls->type == SW_SOCK_UDP6 || ls->type == SW_SOCK_UNIX_DGRAM)
         {
             continue;
         }
 
 #ifdef SW_USE_OPENSSL
-        if (listen_host->ssl)
+        if (ls->ssl)
         {
             if (!serv->ssl_cert_file)
             {
@@ -993,10 +1037,10 @@ int swServer_listen(swServer *serv, swReactor *reactor)
 #endif
 
         //TCP
-        sock = swSocket_listen(listen_host->type, listen_host->host, listen_host->port, serv->backlog);
+        sock = swSocket_listen(ls->type, ls->host, ls->port, serv->backlog);
         if (sock < 0)
         {
-            LL_DELETE(serv->listen_list, listen_host);
+            LL_DELETE(serv->listen_list, ls);
             return SW_ERR;
         }
 
@@ -1041,13 +1085,26 @@ int swServer_listen(swServer *serv, swReactor *reactor)
         }
 #endif
 
-        listen_host->sock = sock;
-        //将server socket也放置到connection_list中
+        ls->sock = sock;
+        //save server socket to connection_list
         serv->connection_list[sock].fd = sock;
-        serv->connection_list[sock].addr.sin_port = listen_host->port;
+
+        //IPv4
+        if (ls->type == SW_SOCK_TCP)
+        {
+            serv->connection_list[sock].info.addr.inet_v4.sin_port = htons(ls->port);
+        }
+        //IPv6
+        else
+        {
+            serv->connection_list[sock].info.addr.inet_v6.sin6_port = htons(ls->port);
+        }
+        //socket type
+        serv->connection_list[sock].socket_type = ls->type;
         //save listen_host object
-        serv->connection_list[sock].object = listen_host;
+        serv->connection_list[sock].object = ls;
     }
+
     //将最后一个fd作为minfd和maxfd
     if (sock >= 0)
     {
@@ -1225,6 +1282,31 @@ static swConnection* swServer_connection_new(swServer *serv, int fd, int from_fd
     {
         connection->direct_send = 1;
     }
+#endif
+
+#ifdef SW_REACTOR_USE_SESSION
+    uint32_t session_id = 1;
+    swSession *session;
+    int i;
+    //get session id
+    for (i = 0; i < serv->max_connection; i++)
+    {
+        session_id = (serv->session_round++) % SW_MAX_SOCKET_ID;
+        if (session_id == 0)
+        {
+            session_id = 1;
+            serv->session_round++;
+        }
+        session = swServer_get_session(serv, session_id);
+        //vacancy
+        if (session->fd == 0)
+        {
+            session->fd = fd;
+            session->id = session_id;
+            break;
+        }
+    }
+    connection->session_id = session_id;
 #endif
 
 	return connection;

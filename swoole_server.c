@@ -26,8 +26,8 @@
 #endif
 
 static int php_swoole_task_id;
-static int php_swoole_udp_from_id;
-static int php_swoole_unix_dgram_fd;
+static int udp_server_socket;
+static int dgram_server_socket;
 
 zval *php_sw_callback[PHP_SERVER_CALLBACK_NUM];
 
@@ -304,17 +304,34 @@ static int php_swoole_onReceive(swFactory *factory, swEventData *req)
     MAKE_STD_ZVAL(zfd);
     MAKE_STD_ZVAL(zfrom_id);
 
-    //udp
+    //udp ipv4
     if (req->info.type == SW_EVENT_UDP)
     {
         udp_info.from_fd = req->info.from_fd;
         udp_info.port = req->info.from_id;
-        memcpy(&php_swoole_udp_from_id, &udp_info, sizeof(php_swoole_udp_from_id));
-        factory->last_from_id = php_swoole_udp_from_id;
+        memcpy(&udp_server_socket, &udp_info, sizeof(udp_server_socket));
+        factory->last_from_id = udp_server_socket;
         swTrace("SendTo: from_id=%d|from_fd=%d", (uint16_t)req->info.from_id, req->info.from_fd);
 
-        ZVAL_LONG(zfrom_id, (long) php_swoole_udp_from_id);
-        ZVAL_LONG(zfd, (long)req->info.fd);
+        ZVAL_LONG(zfrom_id, (long ) udp_server_socket);
+        ZVAL_LONG(zfd, (long )req->info.fd);
+    }
+    //udp ipv6
+    else if (req->info.type == SW_EVENT_UDP6)
+    {
+        udp_info.from_fd = req->info.from_fd;
+        udp_info.port = req->info.from_id;
+        memcpy(&dgram_server_socket, &udp_info, sizeof(udp_server_socket));
+        factory->last_from_id = dgram_server_socket;
+
+        swTrace("SendTo: from_id=%d|from_fd=%d", (uint16_t)req->info.from_id, req->info.from_fd);
+
+        uint16_t ipv6_addr_offset = req->info.fd;
+        ZVAL_LONG(zfrom_id, (long ) dgram_server_socket);
+        req->info.len = ipv6_addr_offset;
+        char tmp[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, req->data + ipv6_addr_offset, tmp, sizeof(tmp));
+        ZVAL_STRING(zfd, tmp, 1);
     }
     //unix dgram
     else if (req->info.type == SW_EVENT_UNIX_DGRAM)
@@ -323,7 +340,7 @@ static int php_swoole_onReceive(swFactory *factory, swEventData *req)
         ZVAL_STRING(zfd, req->data + sun_path_offset, 1);
         req->info.len -= (Z_STRLEN_P(zfd) + 1);
         ZVAL_LONG(zfrom_id, (long)req->info.from_fd);
-        php_swoole_unix_dgram_fd = req->info.from_fd;
+        dgram_server_socket = req->info.from_fd;
     }
     else
     {
@@ -945,7 +962,7 @@ PHP_FUNCTION(swoole_server_create)
     swTrace("Create swoole_server host=%s, port=%d, mode=%d, type=%d", serv_host, (int) serv_port, serv->factory_mode, (int) sock_type);
     bzero(php_sw_callback, sizeof(zval*) * PHP_SERVER_CALLBACK_NUM);
 
-    if (swServer_addListener(serv, sock_type, serv_host, serv_port) < 0)
+    if (swServer_add_listener(serv, sock_type, serv_host, serv_port) < 0)
     {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "add listener failed.");
         return;
@@ -1299,7 +1316,7 @@ PHP_FUNCTION(swoole_server_set)
     {
         convert_to_string(*v);
         serv->heartbeat_pong_length = Z_STRLEN_PP(v);
-        if (serv->heartbeat_pong_length > SW_HEARTBEAT_PING_LEN)
+        if (serv->heartbeat_pong_length > SW_HEARTBEAT_PONG_LEN)
         {
             php_error_docref(NULL TSRMLS_CC, E_ERROR, "heartbeat pong package too long");
             RETURN_FALSE;
@@ -1577,7 +1594,7 @@ PHP_FUNCTION(swoole_server_addlisten)
         }
     }
     SWOOLE_GET_SERVER(zobject, serv);
-    SW_CHECK_RETURN(swServer_addListener(serv, (int)sock_type, host, (int)port));
+    SW_CHECK_RETURN(swServer_add_listener(serv, (int)sock_type, host, (int)port));
 }
 
 PHP_METHOD(swoole_server, addprocess)
@@ -1680,21 +1697,17 @@ PHP_FUNCTION(swoole_server_start)
     RETURN_TRUE;
 }
 
-
 PHP_FUNCTION(swoole_server_send)
 {
     zval *zobject = getThis();
     swServer *serv = NULL;
-    swFactory *factory = NULL;
-    swSendData _send;
+    int ret;
 
     char *send_data;
     int send_len;
 
     zval *zfd;
-
-    long _fd = 0;
-    long from_id = -1;
+    long server_socket = -1;
 
     if (SwooleGS->start == 0)
     {
@@ -1705,14 +1718,14 @@ PHP_FUNCTION(swoole_server_send)
     if (zobject == NULL)
     {
         if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "Ozs|l", &zobject, swoole_server_class_entry_ptr, &zfd, &send_data,
-                &send_len, &from_id) == FAILURE)
+                &send_len, &server_socket) == FAILURE)
         {
             return;
         }
     }
     else
     {
-        if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "zs|l", &zfd, &send_data, &send_len, &from_id) == FAILURE)
+        if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "zs|l", &zfd, &send_data, &send_len, &server_socket) == FAILURE)
         {
             return;
         }
@@ -1725,54 +1738,51 @@ PHP_FUNCTION(swoole_server_send)
     }
 
     SWOOLE_GET_SERVER(zobject, serv);
-    factory = &(serv->factory);
 
     if (Z_TYPE_P(zfd) == IS_STRING)
     {
-        //unix dgram
-        if (!is_numeric_string(Z_STRVAL_P(zfd), Z_STRLEN_P(zfd), &_fd, NULL, 0))
+        if (server_socket == -1)
         {
-            _send.info.from_fd = (from_id > 0) ? from_id : php_swoole_unix_dgram_fd;
-            if (_send.info.from_fd == 0)
-            {
-                php_error_docref(NULL TSRMLS_CC, E_WARNING, "no unix socket listener.");
-                RETURN_FALSE;
-            }
-
-            _send.info.fd = (int) _fd;
-            _send.info.type = SW_EVENT_UNIX_DGRAM;
-            _send.sun_path = Z_STRVAL_P(zfd);
-            _send.sun_path_len = Z_STRLEN_P(zfd);
-            _send.info.len = send_len;
-            _send.data = send_data;
-            SW_CHECK_RETURN(factory->finish(factory, &_send));
+            server_socket = dgram_server_socket;
         }
-    }
-    else
-    {
-        _fd = Z_LVAL_P(zfd);
+
+        //UDP IPv6
+        if (server_socket > 65536)
+        {
+            php_swoole_udp_t udp_info;
+            memcpy(&udp_info, &server_socket, sizeof(udp_info));           
+            ret = swSocket_udp_sendto6(udp_info.from_fd, Z_STRVAL_P(zfd), udp_info.port, send_data, send_len);
+        }
+        //UNIX DGRAM
+        else
+        {
+            struct sockaddr_un addr_un;
+            memcpy(addr_un.sun_path, Z_STRVAL_P(zfd), Z_STRLEN_P(zfd));
+            addr_un.sun_family = AF_UNIX;
+            addr_un.sun_path[Z_STRLEN_P(zfd)] = 0;
+            ret = swSocket_sendto_blocking(server_socket, send_data, send_len, 0, (struct sockaddr *) &addr_un, sizeof(addr_un));
+        }
+        SW_CHECK_RETURN(ret);
     }
 
-    uint32_t fd = (uint32_t) _fd;
-
+    uint32_t fd = (uint32_t) Z_LVAL_P(zfd);
     //UDP
     if (swServer_is_udp(fd))
     {
-        if (from_id == -1)
+        if (server_socket == -1)
         {
-            from_id = php_swoole_udp_from_id;
+            server_socket = udp_server_socket;
         }
-        php_swoole_udp_t udp_info;
-        memcpy(&udp_info, &from_id, sizeof(udp_info));
 
-        _send.info.fd = fd;
-        _send.info.from_id = (uint16_t) (udp_info.port);
-        _send.info.from_fd = (uint16_t) (udp_info.from_fd);
-        _send.info.type = SW_EVENT_UDP;
-        _send.data = send_data;
-        _send.info.len = send_len;
-        swTrace("udp send: fd=%d|from_id=%d|from_fd=%d", _send.info.fd, (uint16_t)_send.info.from_id, _send.info.from_fd);
-        SW_CHECK_RETURN(factory->finish(factory, &_send));
+        php_swoole_udp_t udp_info;
+        memcpy(&udp_info, &server_socket, sizeof(udp_info));
+
+        struct sockaddr_in addr_in;
+        addr_in.sin_family = AF_INET;
+        addr_in.sin_port = htons((uint16_t) (uint16_t) (udp_info.port));
+        addr_in.sin_addr.s_addr = fd;
+        ret = swSocket_sendto_blocking(udp_info.from_fd, send_data, send_len, 0, (struct sockaddr *) &addr_in, sizeof(addr_in));
+        SW_CHECK_RETURN(ret);
     }
     //TCP
     else
@@ -1782,31 +1792,27 @@ PHP_FUNCTION(swoole_server_send)
             swoole_php_error(E_WARNING, "cannot send to client in task worker with SWOOLE_BASE mode.");
             RETURN_FALSE;
         }
-
         if (serv->packet_mode == 1)
         {
             uint32_t len_tmp= htonl(send_len);
             swServer_tcp_send(serv, fd, &len_tmp, 4);
         }
-
-        swTrace("tcp send: fd=%d|from_id=%d", _send.info.fd, (uint16_t)_send.info.from_id);
         SW_CHECK_RETURN(swServer_tcp_send(serv, fd, send_data, send_len));
     }
 }
 
-PHP_FUNCTION(swoole_server_sendto)
+PHP_METHOD(swoole_server, sendto)
 {
     zval *zobject = getThis();
     swServer *serv = NULL;
-    swFactory *factory = NULL;
-    swSendData _send;
 
-    char *send_data;
-    int send_len;
+    char *data;
+    int len;
 
     char* ip;
     char* ip_len;
     long port;
+    zend_bool ipv6 = 0;
 
     if (SwooleGS->start == 0)
     {
@@ -1814,51 +1820,40 @@ PHP_FUNCTION(swoole_server_sendto)
         RETURN_FALSE;
     }
 
-    if (zobject == NULL)
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sls|b", &ip, &ip_len, &port, &data, &len, &ipv6) == FAILURE)
     {
-        if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "Osls", &zobject, swoole_server_class_entry_ptr, &ip, &ip_len,
-        		&port, &send_data, &send_len) == FAILURE)
-        {
-            return;
-        }
-    }
-    else
-    {
-        if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sls", &ip, &ip_len,
-        		&port, &send_data, &send_len) == FAILURE)
-        {
-            return;
-        }
+        return;
     }
 
-    if (send_len <= 0)
+    if (len <= 0)
     {
         php_error_docref(NULL TSRMLS_CC, E_WARNING, "data is empty.");
         RETURN_FALSE;
     }
 
     SWOOLE_GET_SERVER(zobject, serv);
-    factory = &(serv->factory);
 
-    if (serv->dgram_socket_fd <= 0)
+    if (ipv6 == 0 && serv->udp_socket_ipv4 <= 0)
     {
     	php_error_docref(NULL TSRMLS_CC, E_WARNING, "You must add an UDP listener to server before using sendto.");
         RETURN_FALSE;
     }
-
-    struct sockaddr_in addr_in;
-    if (inet_aton(ip, &addr_in.sin_addr)==0) {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "ip is invalid.");
+    else if (ipv6 == 1 && serv->udp_socket_ipv6 <= 0)
+    {
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "You must add an UDP6 listener to server before using sendto.");
         RETURN_FALSE;
-	}
-    _send.info.fd = addr_in.sin_addr.s_addr;
-	_send.info.from_id = (uint16_t) port;
-	_send.info.from_fd = (uint16_t) serv->dgram_socket_fd;
-	_send.info.type = SW_EVENT_UDP;
-	_send.data = send_data;
-	_send.info.len = send_len;
-	 swTrace("udp send: fd=%d|from_id=%d|from_fd=%d", _send.info.fd, (uint16_t)_send.info.from_id, _send.info.from_fd);
-	 SW_CHECK_RETURN(factory->finish(factory, &_send));
+    }
+
+    int ret;
+    if (ipv6)
+    {
+        ret = swSocket_udp_sendto6(serv->udp_socket_ipv6, ip, port, data, len);
+    }
+    else
+    {
+        ret = swSocket_udp_sendto(serv->udp_socket_ipv4, ip, port, data, len);
+    }
+    SW_CHECK_RETURN(ret);
 }
 
 PHP_FUNCTION(swoole_server_sendfile)
@@ -2636,7 +2631,7 @@ PHP_FUNCTION(swoole_connection_info)
     zval *zobject = getThis();
     swServer *serv;
     zend_bool noCheckConnection = 0;
-    long fd = 0;
+    zval *zfd;
     long from_id = -1;
 
     if (SwooleGS->start == 0)
@@ -2647,44 +2642,66 @@ PHP_FUNCTION(swoole_connection_info)
 
     if (zobject == NULL)
     {
-        if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "Ol|lb", &zobject, swoole_server_class_entry_ptr, &fd, &from_id, &noCheckConnection) == FAILURE)
+        if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "Oz|lb", &zobject, swoole_server_class_entry_ptr, &zfd, &from_id, &noCheckConnection) == FAILURE)
         {
             return;
         }
     }
     else
     {
-        if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "l|lb", &fd, &from_id, &noCheckConnection) == FAILURE)
+        if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "z|lb", &zfd, &from_id, &noCheckConnection) == FAILURE)
         {
             return;
         }
     }
     SWOOLE_GET_SERVER(zobject, serv);
 
-    //udp client
-    if (swServer_is_udp(fd))
+    long fd;
+    zend_bool ipv6_udp = 0;
+
+    //ipv6 udp
+    if (Z_TYPE_P(zfd) == IS_STRING)
+    {
+        fd = 0;
+        ipv6_udp = 1;
+    }
+    else
+    {
+        fd = Z_LVAL_P(zfd);
+    }
+
+    //udp
+    if (ipv6_udp || swServer_is_udp(fd))
     {
         array_init(return_value);
-        php_swoole_udp_t udp_info;
-        if (from_id < 0)
-        {
-            from_id = php_swoole_udp_from_id;
-        }
-        memcpy(&udp_info, &from_id, sizeof(udp_info));
 
+        if (ipv6_udp)
+        {
+            add_assoc_zval(return_value, "remote_ip", zfd);
+        }
+        else
+        {
+            struct in_addr sin_addr;
+            sin_addr.s_addr = fd;
+            sw_add_assoc_string(return_value, "remote_ip", inet_ntoa(sin_addr), 1);
+        }
+
+        if (from_id == 0)
+        {
+            return;
+        }
+
+        php_swoole_udp_t udp_info;
+        memcpy(&udp_info, &from_id, sizeof(udp_info));
         swConnection *from_sock = swServer_connection_get(serv, udp_info.from_fd);
-        struct in_addr sin_addr;
-        sin_addr.s_addr = fd;
-        if (from_sock != NULL)
+
+        if (from_sock != NULL && serv->listen_port_num > 1)
         {
-            add_assoc_long(return_value, "from_fd", udp_info.from_fd);
-            add_assoc_long(return_value, "from_port", from_sock->addr.sin_port);
+            add_assoc_long(return_value, "server_fd", from_sock->fd);
+            add_assoc_long(return_value, "socket_type", from_sock->socket_type);
+            add_assoc_long(return_value, "server_port", swConnection_get_port(from_sock));
         }
-        if (from_id != 0)
-        {
-            add_assoc_long(return_value, "remote_port", udp_info.port);
-        }
-        sw_add_assoc_string(return_value, "remote_ip", inet_ntoa(sin_addr), 1);
+        add_assoc_long(return_value, "remote_port", udp_info.port);
         return;
     }
 
@@ -2706,18 +2723,26 @@ PHP_FUNCTION(swoole_connection_info)
         {
             add_assoc_long(return_value, "uid", conn->uid);
         }
+
         if (serv->open_websocket_protocol)
         {
             add_assoc_long(return_value, "websocket_status", conn->websocket_status);
         }
 
+        swConnection *from_sock = swServer_connection_get(serv, conn->from_fd);
+        if (serv->listen_port_num > 1)
+        {
+            add_assoc_long(return_value, "server_fd", conn->from_fd);
+            add_assoc_long(return_value, "socket_type", conn->socket_type);
+            add_assoc_long(return_value, "server_port", swConnection_get_port(from_sock));
+        }
+
+        add_assoc_long(return_value, "remote_port", swConnection_get_port(conn));
+        sw_add_assoc_string(return_value, "remote_ip", swConnection_get_ip(conn), 1);
+
         add_assoc_long(return_value, "from_id", conn->from_id);
-        add_assoc_long(return_value, "from_fd", conn->from_fd);
         add_assoc_long(return_value, "connect_time", conn->connect_time);
         add_assoc_long(return_value, "last_time", conn->last_time);
-        add_assoc_long(return_value, "from_port", serv->connection_list[conn->from_fd].addr.sin_port);
-        add_assoc_long(return_value, "remote_port", ntohs(conn->addr.sin_port));
-        sw_add_assoc_string(return_value, "remote_ip", inet_ntoa(conn->addr.sin_addr), 1);
     }
 }
 

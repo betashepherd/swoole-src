@@ -39,7 +39,7 @@
 #include "Client.h"
 #include "async.h"
 
-#define PHP_SWOOLE_VERSION  "1.7.12-alpha"
+#define PHP_SWOOLE_VERSION  "1.7.13-rc2"
 #define PHP_SWOOLE_CHECK_CALLBACK
 
 /**
@@ -91,6 +91,7 @@ extern void ***sw_thread_ctx;
 
 #define swoole_php_error(level, fmt_str, ...)   if (SWOOLE_G(display_errors)) php_error_docref(NULL TSRMLS_CC, level, fmt_str, ##__VA_ARGS__)
 #define swoole_php_fatal_error(level, fmt_str, ...)   php_error_docref(NULL TSRMLS_CC, level, fmt_str, ##__VA_ARGS__)
+#define swoole_php_sys_error(level, fmt_str, ...)   php_error_docref(NULL TSRMLS_CC, level, fmt_str" Error: %s[%d].", ##__VA_ARGS__, strerror(errno), errno)
 
 #ifdef SW_ASYNC_MYSQL
 #if defined(SW_HAVE_MYSQLI) && defined(SW_HAVE_MYSQLND)
@@ -257,7 +258,6 @@ PHP_FUNCTION(swoole_server_set);
 PHP_FUNCTION(swoole_server_start);
 PHP_FUNCTION(swoole_server_stop);
 PHP_FUNCTION(swoole_server_send);
-PHP_FUNCTION(swoole_server_sendto);
 PHP_FUNCTION(swoole_server_sendfile);
 PHP_FUNCTION(swoole_server_close);
 PHP_FUNCTION(swoole_server_on);
@@ -278,6 +278,7 @@ PHP_METHOD(swoole_server, sendmessage);
 PHP_METHOD(swoole_server, addprocess);
 PHP_METHOD(swoole_server, stats);
 PHP_METHOD(swoole_server, bind);
+PHP_METHOD(swoole_server, sendto);
 
 PHP_FUNCTION(swoole_event_add);
 PHP_FUNCTION(swoole_event_set);
@@ -307,15 +308,6 @@ PHP_FUNCTION(swoole_get_mysqli_sock);
 #endif
 
 PHP_FUNCTION(swoole_client_select);
-
-PHP_METHOD(swoole_client, __construct);
-PHP_METHOD(swoole_client, connect);
-PHP_METHOD(swoole_client, recv);
-PHP_METHOD(swoole_client, send);
-PHP_METHOD(swoole_client, sendfile);
-PHP_METHOD(swoole_client, isConnected);
-PHP_METHOD(swoole_client, close);
-PHP_METHOD(swoole_client, on);
 
 PHP_METHOD(swoole_lock, __construct);
 PHP_METHOD(swoole_lock, lock);

@@ -535,8 +535,7 @@ static int swFactoryProcess_manager_loop(swFactory *factory)
             ret = kill(reload_workers[reload_worker_i].pid, SIGTERM);
             if (ret < 0)
             {
-                swSysError("[Manager]kill(%d) failed.", reload_workers[reload_worker_i].pid);
-                continue;
+                swSysError("kill(%d, SIGTERM) failed.", reload_workers[reload_worker_i].pid);
             }
             reload_worker_i++;
         }
@@ -661,25 +660,6 @@ static int swFactoryProcess_finish(swFactory *factory, swSendData *resp)
     int ret, sendn;
     swServer *serv = factory->ptr;
     int fd = resp->info.fd;
-
-    //unix dgram
-    if (resp->info.type == SW_EVENT_UNIX_DGRAM)
-    {
-        socklen_t len;
-        struct sockaddr_un addr_un;
-        int from_sock = resp->info.from_fd;
-
-        addr_un.sun_family = AF_UNIX;
-        memcpy(addr_un.sun_path, resp->sun_path, resp->sun_path_len);
-        addr_un.sun_path[resp->sun_path_len] = 0;
-        len = sizeof(addr_un);
-        return swSocket_sendto_blocking(from_sock, resp->data, resp->info.len, 0, (struct sockaddr *) &addr_un, len);
-    }
-    //UDP pacakge
-    else if (resp->info.type == SW_EVENT_UDP || resp->info.type == SW_EVENT_UDP6)
-    {
-        return swServer_udp_send(serv, resp);
-    }
 
     swConnection *conn = swWorker_get_connection(serv, fd);
     if (conn == NULL || conn->active == 0 || ((conn->closed || conn->removed) && resp->info.type != SW_EVENT_CLOSE))
@@ -819,18 +799,19 @@ static int swFactoryProcess_dispatch(swFactory *factory, swDispatchData *task)
         target_worker_id = task->target_worker_id;
     }
 
-    if (!swEventData_is_stream(task->data.info.type))
+    if (swEventData_is_stream(task->data.info.type))
     {
         swConnection *conn = swServer_connection_get(serv, task->data.info.fd);
         if (conn == NULL || conn->active == 0)
         {
-            swWarn("connection#%d is not active.", task->data.info.fd);
+            swWarn("dispatch[type=%d] failed, connection#%d is not active.", task->data.info.type, task->data.info.fd);
             return SW_ERR;
         }
         //server active close, discard data.
         if (conn->closed)
         {
-            swWarn("connection#%d is closed by server.", task->data.info.fd);
+            swWarn("dispatch[type=%d] failed, connection#%d is closed by server.", task->data.info.type,
+                    task->data.info.fd);
             return SW_OK;
         }
     }

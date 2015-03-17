@@ -39,10 +39,10 @@ int swReactorProcess_create(swServer *serv)
     }
 
 #ifdef SW_REACTOR_USE_SESSION
-    serv->session_list = sw_calloc(serv->max_connection, sizeof(swSession));
+    serv->session_list = sw_calloc(SW_SESSION_LIST_SIZE, sizeof(swSession));
     if (serv->session_list == NULL)
     {
-        swSysError("calloc[2](%d) failed.", (int )(serv->max_connection * sizeof(swSession)));
+        swSysError("calloc[2](%ld) failed.", SW_SESSION_LIST_SIZE * sizeof(swSession));
         return SW_ERR;
     }
 #endif
@@ -76,7 +76,7 @@ int swReactorProcess_start(swServer *serv)
             if (listen_host->type == SW_SOCK_UDP || listen_host->type == SW_SOCK_UDP6
                     || listen_host->type == SW_SOCK_UNIX_DGRAM)
             {
-                serv->connection_list[listen_host->sock].addr.sin_port = listen_host->port;
+                serv->connection_list[listen_host->sock].info.addr.inet_v4.sin_port = htons(listen_host->port);
                 serv->connection_list[listen_host->sock].fd = listen_host->sock;
                 serv->connection_list[listen_host->sock].object = listen_host;
             }
@@ -187,14 +187,17 @@ static int swReactorProcess_loop(swProcessPool *pool, swWorker *worker)
         return SW_ERR;
     }
 
-    swListenList_node *listen_host;
-    int type;
+    swListenList_node *ls;
+    int fdtype;
 
     //listen the all tcp port
-    LL_FOREACH(serv->listen_list, listen_host)
+    LL_FOREACH(serv->listen_list, ls)
     {
-        type = (listen_host->type == SW_SOCK_UDP || listen_host->type == SW_SOCK_UDP6) ? SW_FD_UDP : SW_FD_LISTEN;
-        reactor->add(reactor, listen_host->sock, type);
+        fdtype = (ls->type == SW_SOCK_UDP || ls->type == SW_SOCK_UDP6 || ls->type == SW_SOCK_UNIX_DGRAM) ?
+                        SW_FD_UDP : SW_FD_LISTEN;
+        serv->connection_list[ls->sock].fd = ls->sock;
+        serv->connection_list[ls->sock].socket_type = ls->type;
+        reactor->add(reactor, ls->sock, fdtype);
     }
     SwooleG.main_reactor = reactor;
 
@@ -219,6 +222,9 @@ static int swReactorProcess_loop(swProcessPool *pool, swWorker *worker)
     reactor->thread = 1;
     reactor->socket_list = serv->connection_list;
     reactor->max_socket = serv->max_connection;
+    
+    reactor->disable_accept = 0;
+    reactor->enable_accept = swServer_enable_accept;
 
     reactor->close = swReactorThread_close;
 

@@ -20,6 +20,7 @@
 #define SW_ERROR_MSG_SIZE          512
 #define SW_MAX_WORKER_GROUP        2
 #define SW_MAX_FILE_CONTENT        (64*1024*1024) //for swoole_file_get_contents
+#define SW_MAX_LISTEN_PORT         128  //allows up to 128 ports to listen
 
 #define SW_USE_EVENT_TIMER
 //#define SW_USE_RINGBUFFER
@@ -117,6 +118,7 @@
 #define SW_REACTOR_MINEVENTS             128
 #define SW_REACTOR_MAXEVENTS             4096
 #define SW_REACTOR_USE_SESSION
+#define SW_SESSION_LIST_SIZE             (1024*1024)
 
 /**
  * 最大Reactor线程数量，默认会启动CPU核数的线程数
@@ -200,7 +202,7 @@
 #define SW_HTTP_BAD_REQUEST              "<h1>400 Bad Request</h1>\r\n"
 #define SW_HTTP_PARAM_MAX_NUM            128
 #define SW_HTTP_COOKIE_KEYLEN            128
-#define SW_HTTP_HEADER_INIT_SIZE         1024
+#define SW_HTTP_RESPONSE_INIT_SIZE       65536
 
 #define SW_WEBSOCKET_SERVER_SOFTWARE     "swoole-websocket-server"
 #define SW_WEBSOCKET_VERSION             "13"

@@ -42,6 +42,19 @@ static int swReactorThread_send_in_buffer(swReactorThread *thread, swConnection 
 static int swReactorThread_get_package_length(swServer *serv, swConnection *conn, char *data, uint32_t size);
 
 #ifdef SW_USE_RINGBUFFER
+static sw_inline void swReactorThread_yield(swReactorThread *thread)
+{
+    swEvent event;
+    swServer *serv = SwooleG.serv;
+    int i;
+    for (i = 0; i < serv->reactor_pipe_num; i++)
+    {
+        event.fd = thread->pipe_read_list[i];
+        swReactorThread_onPipeReceive(&thread->reactor, &event);
+    }
+    swYield();
+}
+
 static sw_inline void* swReactorThread_alloc(swReactorThread *thread, uint32_t size)
 {
     void *ptr = NULL;
@@ -59,7 +72,7 @@ static sw_inline void* swReactorThread_alloc(swReactorThread *thread, uint32_t s
                 try_count = 0;
             }
             try_count++;
-            swYield();
+            swReactorThread_yield(thread);
             continue;
         }
         break;
@@ -67,6 +80,8 @@ static sw_inline void* swReactorThread_alloc(swReactorThread *thread, uint32_t s
     //debug("%p\n", ptr);
     return ptr;
 }
+
+
 #endif
 
 /**
@@ -191,7 +206,7 @@ int swReactorThread_close(swReactor *reactor, int fd)
 #endif
 
 #ifdef SW_REACTOR_USE_SESSION
-    swSession *session = &serv->session_list[conn->session_id % serv->max_connection];
+    swSession *session = swServer_get_session(serv, conn->session_id);
     session->fd = 0;
 #endif
 
@@ -369,17 +384,17 @@ int swReactorThread_send(swSendData *_send)
 
 #ifdef SW_REACTOR_USE_SESSION
     int session_id = _send->info.fd;
-    swSession *session = &(serv->session_list[session_id % serv->max_connection]);
+    swSession *session = swServer_get_session(serv, session_id);
     fd = session->fd;
     swConnection *conn = swServer_connection_get(serv, fd);
     if (!conn)
     {
-        swWarn("send to socket#%d[session_id=%d] failed, the connection is closed.", fd, session_id);
+        swWarn("send[%d] failed, the connection#%d[session=%d] is closed.", _send->info.type, fd, session_id);
         return SW_ERR;
     }
     if (session->id != session_id || conn->session_id != session_id)
     {
-        swWarn("send failed, the session#%d has expired.", session_id);
+        swWarn("send[%d] failed, the session#%d[socket=%d] has expired.", _send->info.type, session_id, conn->fd);
         return SW_ERR;
     }
 #else
@@ -400,7 +415,8 @@ int swReactorThread_send(swSendData *_send)
     swReactor *reactor = &(serv->reactor_threads[conn->from_id].reactor);
 
     swTraceLog(SW_TRACE_EVENT, "send-data. fd=%d|reactor_id=%d", fd, reactor_id);
-    if (conn->out_buffer == NULL)
+
+    if (swBuffer_empty(conn->out_buffer))
     {
         /**
         * close connection.
@@ -445,10 +461,13 @@ int swReactorThread_send(swSendData *_send)
 #ifdef SW_REACTOR_SYNC_SEND
             buffer_send:
 #endif
-            conn->out_buffer = swBuffer_new(SW_BUFFER_SIZE);
-            if (conn->out_buffer == NULL)
+            if (!conn->out_buffer)
             {
-                return SW_ERR;
+                conn->out_buffer = swBuffer_new(SW_BUFFER_SIZE);
+                if (conn->out_buffer == NULL)
+                {
+                    return SW_ERR;
+                }
             }
         }
     }
@@ -477,13 +496,13 @@ int swReactorThread_send(swSendData *_send)
         //connection is closed
         if (conn->removed)
         {
-            swWarn("the connection#%d is closed by client.", fd);
+            swWarn("connection#%d is closed by client.", fd);
             return SW_ERR;
         }
         //connection output buffer overflow
         if (conn->out_buffer->length >= serv->buffer_output_size)
         {
-            swWarn("Connection output buffer overflow.");
+            swWarn("connection#%d output buffer overflow.", fd);
             conn->overflow = 1;
         }
         //buffer enQueue
@@ -1532,10 +1551,10 @@ int swReactorThread_create(swServer *serv)
     }
 
 #ifdef SW_REACTOR_USE_SESSION
-    serv->session_list = sw_shm_calloc(serv->max_connection, sizeof(swSession));
+    serv->session_list = sw_shm_calloc(SW_SESSION_LIST_SIZE, sizeof(swSession));
     if (serv->session_list == NULL)
     {
-        swError("sw_shm_calloc(%ld) for session_list failed", serv->max_connection * sizeof(swSession));
+        swError("sw_shm_calloc(%ld) for session_list failed", SW_SESSION_LIST_SIZE * sizeof(swSession));
         return SW_ERR;
     }
 #endif
@@ -1654,12 +1673,16 @@ static int swReactorThread_loop_tcp(swThreadParam *param)
     {
         cpu_set_t cpu_set;
         CPU_ZERO(&cpu_set);
-        if(serv->cpu_affinity_available_num){
-           CPU_SET(serv->cpu_affinity_available[reactor_id % serv->cpu_affinity_available_num], &cpu_set);
-        }else{
-           CPU_SET(reactor_id%SW_CPU_NUM, &cpu_set);
+
+        if (serv->cpu_affinity_available_num)
+        {
+            CPU_SET(serv->cpu_affinity_available[reactor_id % serv->cpu_affinity_available_num], &cpu_set);
         }
-       
+        else
+        {
+            CPU_SET(reactor_id%SW_CPU_NUM, &cpu_set);
+        }
+
         if (0 != pthread_setaffinity_np(pthread_self(), sizeof(cpu_set), &cpu_set))
         {
             swSysError("pthread_setaffinity_np() failed");
@@ -1693,10 +1716,27 @@ static int swReactorThread_loop_tcp(swThreadParam *param)
     swReactorThread_set_protocol(serv, reactor);
 
     int i = 0, pipe_fd;
+#ifdef SW_USE_RINGBUFFER
+    int j = 0;
+#endif
 
     if (serv->factory_mode == SW_MODE_PROCESS)
     {
         thread->buffer_pipe = swArray_new(serv->workers[serv->worker_num - 1].pipe_master + 1, sizeof(void*), 0);
+        if (thread->buffer_pipe == NULL)
+        {
+            swSysError("thread->buffer_pipe create failed");
+            return SW_ERR;
+        }
+
+#ifdef SW_USE_RINGBUFFER
+        thread->pipe_read_list = sw_calloc(serv->reactor_pipe_num, sizeof(int));
+        if (thread->pipe_read_list == NULL)
+        {
+            swSysError("thread->buffer_pipe create failed");
+            return SW_ERR;
+        }
+#endif
 
         for (i = 0; i < serv->worker_num; i++)
         {
@@ -1722,6 +1762,10 @@ static int swReactorThread_loop_tcp(swThreadParam *param)
                  * mapping reactor_id and worker pipe
                  */
                 serv->connection_list[pipe_fd].from_id = reactor_id;
+#ifdef SW_USE_RINGBUFFER
+                thread->pipe_read_list[j] = pipe_fd;
+                j++;
+#endif
             }
         }
     }
@@ -1745,23 +1789,33 @@ static int swUDPThread_start(swServer *serv)
 {
     swThreadParam *param;
     pthread_t thread_id;
-    swListenList_node *listen_host;
+    swListenList_node *ls;
 
     void * (*thread_loop)(void *);
 
-    LL_FOREACH(serv->listen_list, listen_host)
+    LL_FOREACH(serv->listen_list, ls)
     {
         param = SwooleG.memory_pool->alloc(SwooleG.memory_pool, sizeof(swThreadParam));
         //UDP
-        if (listen_host->type == SW_SOCK_UDP || listen_host->type == SW_SOCK_UDP6 || listen_host->type == SW_SOCK_UNIX_DGRAM)
+        if (ls->type == SW_SOCK_UDP || ls->type == SW_SOCK_UDP6 || ls->type == SW_SOCK_UNIX_DGRAM)
         {
-            serv->connection_list[listen_host->sock].addr.sin_port = listen_host->port;
-            serv->connection_list[listen_host->sock].object = listen_host;
+            if (ls->type == SW_SOCK_UDP)
+            {
+                serv->connection_list[ls->sock].info.addr.inet_v4.sin_port = htons(ls->port);
+            }
+            else
+            {
+                serv->connection_list[ls->sock].info.addr.inet_v6.sin6_port = htons(ls->port);
+            }
+
+            serv->connection_list[ls->sock].fd = ls->sock;
+            serv->connection_list[ls->sock].socket_type = ls->type;
+            serv->connection_list[ls->sock].object = ls;
 
             param->object = serv;
-            param->pti = listen_host->sock;
+            param->pti = ls->sock;
 
-            if (listen_host->type == SW_SOCK_UNIX_DGRAM)
+            if (ls->type == SW_SOCK_UNIX_DGRAM)
             {
                 thread_loop = (void * (*)(void *)) swReactorThread_loop_unix_dgram;
             }
@@ -1775,7 +1829,7 @@ static int swUDPThread_start(swServer *serv)
                 swWarn("pthread_create[udp_listener] fail");
                 return SW_ERR;
             }
-            listen_host->thread_id = thread_id;
+            ls->thread_id = thread_id;
         }
     }
     return SW_OK;
@@ -1788,41 +1842,70 @@ static int swUDPThread_start(swServer *serv)
 static int swReactorThread_loop_udp(swThreadParam *param)
 {
     int ret;
-    socklen_t addrlen;
     swServer *serv = param->object;
 
     swDispatchData task;
-    struct sockaddr_in addr_in;
-    addrlen = sizeof(addr_in);
+    swSocketAddress info;
+    info.len = sizeof(info.addr);
 
-    int sock = param->pti;
+    int fd = param->pti;
 
     SwooleTG.factory_lock_target = 0;
     SwooleTG.factory_target_worker = -1;
-    SwooleTG.id = sock;
+    SwooleTG.id = fd;
     SwooleTG.type = SW_THREAD_UDP;
 
     swSignal_none();
 
+    swConnection *server_sock = &serv->connection_list[fd];
     //blocking
-    swSetBlock(sock);
+    swSetBlock(fd);
 
     bzero(&task.data.info, sizeof(task.data.info));
-    task.data.info.from_fd = sock;
+    task.data.info.from_fd = fd;
+
+    int socket_type = server_sock->socket_type;
+    int buffer_size;
+
+    //IPv4
+    if (socket_type == SW_SOCK_UDP)
+    {
+        task.data.info.type = SW_EVENT_UDP;
+        buffer_size = SW_IPC_MAX_SIZE - sizeof(struct _swDataHead);
+    }
+    //IPv6
+    else
+    {
+        task.data.info.type = SW_EVENT_UDP6;
+        buffer_size = SW_IPC_MAX_SIZE - sizeof(struct _swDataHead) - sizeof(info.addr.inet_v6.sin6_addr);
+    }
 
     while (SwooleG.running == 1)
     {
-        ret = recvfrom(sock, task.data.data, SW_BUFFER_SIZE, 0, (struct sockaddr *) &addr_in, &addrlen);
+        ret = recvfrom(fd, task.data.data, buffer_size, 0, (struct sockaddr *) &info.addr, &info.len);
         if (ret > 0)
         {
-            task.data.info.len = ret;
-            task.data.info.type = SW_EVENT_UDP;
-            //UDP的from_id是PORT，FD是IP
-            task.data.info.from_id = ntohs(addr_in.sin_port);  //转换字节序
-            task.data.info.fd = addr_in.sin_addr.s_addr;
+            //IPv4, swDataHead + data
+            if (socket_type == SW_SOCK_UDP)
+            {
+                //UDP的from_id是PORT，FD是IP
+                task.data.info.from_id = ntohs(info.addr.inet_v4.sin_port);
+                task.data.info.fd = info.addr.inet_v4.sin_addr.s_addr;
+                task.data.info.len = ret;
+            }
+            //IPv6, swDataHead + data + sin6_addr
+            else
+            {
+                task.data.info.from_id = ntohs(info.addr.inet_v6.sin6_port);
+                //fd record the offset
+                task.data.info.fd = ret;
+                memcpy(task.data.data + ret, &info.addr.inet_v6.sin6_addr, sizeof(info.addr.inet_v6.sin6_addr));
+                task.data.info.len = ret + sizeof(info.addr.inet_v6.sin6_addr);
+            }
+
             task.target_worker_id = -1;
 
-            swTrace("recvfrom udp socket.fd=%d|data=%s", sock, task.data.data);
+            swTrace("recvfrom udp socket. fd=%d|data=%*s", fd, ret, task.data.data);
             ret = serv->factory.dispatch(&serv->factory, &task);
             if (ret < 0)
             {
@@ -2010,18 +2093,14 @@ static int swReactorThread_loop_unix_dgram(swThreadParam *param)
     bzero(&task.data.info, sizeof(task.data.info));
     task.data.info.from_fd = sock;
     task.data.info.type = SW_EVENT_UNIX_DGRAM;
+    int buffer_size = SW_IPC_MAX_SIZE - sizeof(struct _swDataHead) - sizeof(addr_un.sun_path);
 
     while (SwooleG.running == 1)
     {
-        n = recvfrom(sock, task.data.data, SW_BUFFER_SIZE, 0, (struct sockaddr *) &addr_un, &addrlen);
+        n = recvfrom(sock, task.data.data, buffer_size, 0, (struct sockaddr *) &addr_un, &addrlen);
         if (n > 0)
         {
-            if (n > SW_BUFFER_SIZE - sizeof(addr_un.sun_path))
-            {
-                swWarn("Error: unix dgram length must be less than %ld", SW_BUFFER_SIZE - sizeof(addr_un.sun_path));
-                continue;
-            }
-
+            //unix dgram, swDataHead + data + sun_path
             sun_path_len = strlen(addr_un.sun_path) + 1;
             sun_path_offset = n;
             task.data.info.fd = sun_path_offset;
@@ -2070,14 +2149,13 @@ void swReactorThread_free(swServer *serv)
 
     if (serv->have_udp_sock == 1)
     {
-        swListenList_node *listen_host;
-        LL_FOREACH(serv->listen_list, listen_host)
+        swListenList_node *ls;
+        LL_FOREACH(serv->listen_list, ls)
         {
-            if (listen_host->type == SW_SOCK_UDP || listen_host->type == SW_SOCK_UDP6
-                    || listen_host->type == SW_SOCK_UNIX_DGRAM)
+            if (ls->type == SW_SOCK_UDP || ls->type == SW_SOCK_UDP6 || ls->type == SW_SOCK_UNIX_DGRAM)
             {
-                pthread_cancel(listen_host->thread_id);
-                if (pthread_join(listen_host->thread_id, NULL))
+                pthread_cancel(ls->thread_id);
+                if (pthread_join(ls->thread_id, NULL))
                 {
                     swWarn("pthread_join() failed. Error: %s[%d]", strerror(errno), errno);
                 }

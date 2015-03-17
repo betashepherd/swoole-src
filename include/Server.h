@@ -112,19 +112,22 @@ typedef struct _swReactorThread
     swUdpFd *udp_addrs;
     swMemoryPool *buffer_input;
     swArray *buffer_pipe;
+#ifdef SW_USE_RINGBUFFER
+    int *pipe_read_list;
+#endif
     swLock lock;
     int c_udp_fd;
 } swReactorThread;
 
 typedef struct _swListenList_node
 {
-	struct _swListenList_node *next, *prev;
-	uint8_t type;
-	uint8_t ssl;
-	int port;
-	int sock;
-	pthread_t thread_id;
-	char host[SW_HOST_MAXSIZE];
+    struct _swListenList_node *next, *prev;
+    uint8_t type;
+    uint8_t ssl;
+    int port;
+    int sock;
+    pthread_t thread_id;
+    char host[SW_HOST_MAXSIZE];
 } swListenList_node;
 
 typedef struct _swUserWorker_node
@@ -263,7 +266,9 @@ struct _swServer
 
     int signal_fd;
     int event_fd;
-    int dgram_socket_fd;
+
+    int udp_socket_ipv4;
+    int udp_socket_ipv6;
 
     int ringbuffer_size;
 
@@ -337,7 +342,7 @@ struct _swServer
     /**
      * Use data key as factory->dispatch() param.
      */
-    uint32_t open_dispatch_key: 1;
+    uint32_t open_dispatch_key :1;
 
     /**
      * open tcp_defer_accept option
@@ -357,8 +362,10 @@ struct _swServer
     uint16_t heartbeat_check_interval; //心跳定时侦测时间, 必需小于heartbeat_idle_time
 
     int * cpu_affinity_available;
-    int   cpu_affinity_available_num;
+    int cpu_affinity_available_num;
     
+    uint8_t listen_port_num;
+
     /**
      * 来自客户端的心跳侦测包
      */
@@ -479,7 +486,7 @@ int swServer_onFinish2(swFactory *factory, swSendData *resp);
 void swServer_init(swServer *serv);
 void swServer_signal_init(void);
 int swServer_start(swServer *serv);
-int swServer_addListener(swServer *serv, int type, char *host,int port);
+int swServer_add_listener(swServer *serv, int type, char *host,int port);
 int swServer_add_worker(swServer *serv, swWorker *worker);
 
 int swServer_create(swServer *serv);
@@ -493,9 +500,36 @@ int swServer_tcp_send(swServer *serv, int fd, void *data, uint32_t length);
 //UDP, UDP必然超过0x1000000
 //原因：IPv4的第4字节最小为1,而这里的conn_fd是网络字节序
 #define SW_MAX_SOCKET_ID             0x1000000
-#define swServer_is_udp(fd)          ((uint32_t) fd > 0x1000000)
-#define swEventData_is_dgram(type)   (type == SW_EVENT_UDP || type == SW_EVENT_UDP6 || type == SW_EVENT_UNIX_DGRAM)
-#define swEventData_is_stream(type)  (type == SW_EVENT_TCP || type == SW_EVENT_TCP6 || type == SW_EVENT_UNIX_STREAM)
+#define swServer_is_udp(fd)          ((uint32_t) fd > SW_MAX_SOCKET_ID)
+
+static sw_inline int swEventData_is_dgram(uint8_t type)
+{
+    switch (type)
+    {
+    case SW_EVENT_UDP:
+    case SW_EVENT_UDP6:
+    case SW_EVENT_UNIX_DGRAM:
+        return SW_TRUE;
+    default:
+        return SW_FALSE;
+    }
+}
+
+static sw_inline int swEventData_is_stream(uint8_t type)
+{
+    switch (type)
+    {
+    case SW_EVENT_TCP:
+    case SW_EVENT_TCP6:
+    case SW_EVENT_UNIX_STREAM:
+    case SW_EVENT_PACKAGE_START:
+    case SW_EVENT_PACKAGE:
+    case SW_EVENT_PACKAGE_END:
+        return SW_TRUE;
+    default:
+        return SW_FALSE;
+    }
+}
 
 swPipe * swServer_pipe_get(swServer *serv, int pipe_fd);
 void swServer_pipe_set(swServer *serv, swPipe *p);
@@ -503,6 +537,7 @@ void swServer_pipe_set(swServer *serv, swPipe *p);
 int swServer_get_manager_pid(swServer *serv);
 int swServer_worker_init(swServer *serv, swWorker *worker);
 void swServer_onTimer(swTimer *timer, swTimer_node *event);
+void swServer_enable_accept(swReactor *reactor);
 
 void swTaskWorker_init(swProcessPool *pool);
 int swTaskWorker_onTask(swProcessPool *pool, swEventData *task);
@@ -561,6 +596,16 @@ static sw_inline swConnection* swServer_connection_get(swServer *serv, int fd)
     }
 }
 
+static sw_inline swSession* swServer_get_session(swServer *serv, uint32_t session_id)
+{
+    return &serv->session_list[session_id % SW_SESSION_LIST_SIZE];
+}
+
+static sw_inline int swServer_get_fd(swServer *serv, uint32_t session_id)
+{
+    return serv->session_list[session_id % SW_SESSION_LIST_SIZE].fd;
+}
+
 static sw_inline swWorker* swServer_get_worker(swServer *serv, uint16_t worker_id)
 {
     int task_num = SwooleG.task_worker_max > 0 ? SwooleG.task_worker_max : SwooleG.task_worker_num;
@@ -577,11 +622,6 @@ static sw_inline swWorker* swServer_get_worker(swServer *serv, uint16_t worker_i
     {
         return &(SwooleGS->event_workers.workers[worker_id]);
     }
-}
-
-static sw_inline int swServer_get_fd(swServer *serv, uint32_t session_id)
-{
-    return serv->session_list[session_id % serv->max_connection].fd;
 }
 
 static sw_inline uint32_t swServer_worker_schedule(swServer *serv, uint32_t schedule_key)
@@ -607,9 +647,20 @@ static sw_inline uint32_t swServer_worker_schedule(swServer *serv, uint32_t sche
         {
             target_worker_id = schedule_key % serv->worker_num;
         }
+        //IPv4
+        else if (conn->socket_type == SW_SOCK_TCP)
+        {
+            target_worker_id = conn->info.addr.inet_v4.sin_addr.s_addr % serv->worker_num;
+        }
+        //IPv6
         else
         {
-            target_worker_id = conn->addr.sin_addr.s_addr % serv->worker_num;
+#ifdef HAVE_KQUEUE
+            uint32_t ipv6_last_int = *(((uint32_t *) &conn->info.addr.inet_v6.sin6_addr) + 3);
+            target_worker_id = ipv6_last_int % serv->worker_num;
+#else
+            target_worker_id = conn->info.addr.inet_v6.sin6_addr.s6_addr32[3] % serv->worker_num;
+#endif
         }
     }
     else if (serv->dispatch_mode == SW_DISPATCH_UIDMOD)

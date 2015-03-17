@@ -53,8 +53,6 @@ extern "C" {
 #include <sys/wait.h>
 #include <sys/un.h>
 #include <sys/types.h>
-#include <pwd.h>
-#include <grp.h>
 
 #ifdef __MACH__
 #include <mach/clock.h>
@@ -317,6 +315,23 @@ typedef unsigned char uchar;
 #include <openssl/ssl.h>
 #endif
 
+typedef struct
+{
+    uint32_t id;
+    int fd;
+} swSession;
+
+typedef struct
+{
+    union
+    {
+        struct sockaddr_in inet_v4;
+        struct sockaddr_in6 inet_v6;
+        struct sockaddr_un un;
+    } addr;
+    socklen_t len;
+} swSocketAddress;
+
 typedef struct _swConnection
 {
     /**
@@ -329,7 +344,16 @@ typedef struct _swConnection
      */
     uint32_t session_id;
 
-    int type;
+    /**
+     * socket type, SW_SOCK_TCP or SW_SOCK_UDP
+     */
+    uint8_t socket_type;
+
+    /**
+     * fd type, SW_FD_TCP or SW_FD_PIPE or SW_FD_TIMERFD
+     */
+    uint8_t fdtype;
+
     int events;
 
     /**
@@ -371,7 +395,7 @@ typedef struct _swConnection
     /**
      * socket address
      */
-    struct sockaddr_in addr;
+    swSocketAddress info;
 
     /**
      * link any thing, for kernel, do not use with application.
@@ -415,23 +439,6 @@ typedef struct _swConnection
 
 } swConnection;
 
-typedef struct
-{
-    uint32_t id;
-    int fd;
-} swSession;
-
-typedef struct
-{
-    union
-    {
-        struct sockaddr_in inet_v4;
-        struct sockaddr_in6 inet_v6;
-        struct sockaddr_un un;
-    } addr;
-    socklen_t len;
-} swSocketAddress;
-
 //------------------------------String--------------------------------
 typedef struct _swString
 {
@@ -452,9 +459,16 @@ static sw_inline size_t swoole_size_align(size_t size, int pagesize)
     return size + (pagesize - (size % pagesize));
 }
 
+static sw_inline void swString_clear(swString *str)
+{
+    str->length = 0;
+    str->offset = 0;
+}
+
 swString *swString_new(size_t size);
 swString *swString_dup(char *src_str, int length);
 swString *swString_dup2(swString *src);
+
 void swString_print(swString *str);
 void swString_free(swString *str);
 int swString_append(swString *str, swString *append_str);
@@ -492,18 +506,10 @@ typedef struct _swEventData
 typedef struct _swSendData
 {
     swDataHead info;
-
-    /**
-     * for unix socket
-     */
-    char *sun_path;
-    uint8_t sun_path_len;
-
     /**
      * for big package
      */
     uint32_t length;
-
     char *data;
 } swSendData;
 
@@ -881,12 +887,15 @@ void swoole_clean(void);
 void swoole_update_time(void);
 double swoole_microtime(void);
 void swoole_rtrim(char *str, int len);
+uint64_t swoole_ntoh64(uint64_t n64);
 
 int swSocket_listen(int type, char *host, int port, int backlog);
 int swSocket_create(int type);
 int swSocket_wait(int fd, int timeout_ms, int events);
 void swSocket_clean(int fd, void *buf, int len);
 int swSocket_sendto_blocking(int fd, void *__buf, size_t __n, int flag, struct sockaddr *__addr, socklen_t __addr_len);
+int swSocket_udp_sendto(int server_sock, char *dst_ip, int dst_port, char *data, uint32_t len);
+int swSocket_udp_sendto6(int server_sock, char *dst_ip, int dst_port, char *data, uint32_t len);
 int swSocket_sendfile_sync(int sock, char *filename, double timeout);
 int swSocket_write_blocking(int __fd, void *__data, int __len);
 
@@ -946,6 +955,12 @@ struct swReactor_s
     uint32_t max_event_num;
 
     uint32_t check_timer :1;
+
+    /**
+     * disable accept new connection
+     */
+    uint32_t disable_accept :1;
+
     uint32_t check_signalfd :1;
 
     /**
@@ -986,6 +1001,8 @@ struct swReactor_s
 
     void (*onTimeout)(swReactor *);
     void (*onFinish)(swReactor *);
+
+    void (*enable_accept)(swReactor *);
 
     int (*write)(swReactor *, int __fd, void *__buf, int __n);
     int (*close)(swReactor *, int __fd);
@@ -1178,6 +1195,7 @@ int swReactor_onWrite(swReactor *reactor, swEvent *ev);
 int swReactor_close(swReactor *reactor, int fd);
 int swReactor_write(swReactor *reactor, int fd, void *buf, int n);
 int swReactor_wait_write_buffer(swReactor *reactor, int fd);
+void swReactor_set(swReactor *reactor, int fd, int fdtype);
 
 swReactor_handle swReactor_getHandle(swReactor *reactor, int event_type, int fdtype);
 int swReactorEpoll_create(swReactor *reactor, int max_event_num);

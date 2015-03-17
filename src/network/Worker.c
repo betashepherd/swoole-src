@@ -17,6 +17,9 @@
 #include "swoole.h"
 #include "Server.h"
 
+#include <pwd.h>
+#include <grp.h>
+
 static int swWorker_onPipeReceive(swReactor *reactor, swEvent *event);
 
 int swWorker_create(swWorker *worker)
@@ -92,7 +95,6 @@ static sw_inline int swWorker_get_session_id(swServer *serv, int fd)
     //socket is closed, discard package.
     if (!conn || conn->closed || conn->session_id == 0)
     {
-        swWarn("received the wrong data from socket#%d", fd);
         return SW_ERR;
     }
     return conn->session_id;
@@ -108,6 +110,8 @@ int swWorker_onTask(swFactory *factory, swEventData *task)
     //worker busy
     serv->workers[SwooleWG.id].status = SW_WORKER_BUSY;
 
+    int fd = task->info.fd;
+
     switch (task->info.type)
     {
     case SW_EVENT_TCP:
@@ -116,9 +120,23 @@ int swWorker_onTask(swFactory *factory, swEventData *task)
     case SW_EVENT_PACKAGE:
         do_task:
 #ifdef SW_REACTOR_USE_SESSION
-        task->info.fd = swWorker_get_session_id(serv, task->info.fd);
+        task->info.fd = swWorker_get_session_id(serv, fd);
         if (task->info.fd < 0)
         {
+#ifdef SW_USE_RINGBUFFER
+            if (task->info.type == SW_EVENT_PACKAGE)
+            {
+                swPackage package;
+                memcpy(&package, task->data, sizeof(package));
+                swReactorThread *thread = swServer_get_thread(SwooleG.serv, task->info.from_id);
+                thread->buffer_input->free(thread->buffer_input, package.data);
+                swWarn("[1]received the wrong data[%d bytes] from socket#%d", package.length, fd);
+            }
+            else
+#endif
+            {
+                swWarn("[1]received the wrong data[%d bytes] from socket#%d", task->info.len, fd);
+            }
             return SW_OK;
         }
 #endif
@@ -148,6 +166,7 @@ int swWorker_onTask(swFactory *factory, swEventData *task)
         break;
 
     case SW_EVENT_UDP:
+    case SW_EVENT_UDP6:
     case SW_EVENT_UNIX_DGRAM:
         factory->onTask(factory, task);
         if (!SwooleWG.run_always)
@@ -158,9 +177,10 @@ int swWorker_onTask(swFactory *factory, swEventData *task)
 
     case SW_EVENT_CLOSE:
 #ifdef SW_REACTOR_USE_SESSION
-        task->info.fd = swWorker_get_session_id(serv, task->info.fd);
+        task->info.fd = swWorker_get_session_id(serv, fd);
         if (task->info.fd < 0)
         {
+            swWarn("[2]received the wrong data from socket#%d", fd);
             return SW_OK;
         }
 #endif
@@ -169,9 +189,10 @@ int swWorker_onTask(swFactory *factory, swEventData *task)
 
     case SW_EVENT_CONNECT:
 #ifdef SW_REACTOR_USE_SESSION
-        task->info.fd = swWorker_get_session_id(serv, task->info.fd);
+        task->info.fd = swWorker_get_session_id(serv, fd);
         if (task->info.fd < 0)
         {
+            swWarn("[3]received the wrong data from socket#%d", fd);
             return SW_OK;
         }
 #endif
