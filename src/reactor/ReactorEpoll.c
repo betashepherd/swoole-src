@@ -8,7 +8,7 @@
  | http://www.apache.org/licenses/LICENSE-2.0.html                      |
  | If you did not receive a copy of the Apache2.0 license and are unable|
  | to obtain it through the world-wide-web, please send a note to       |
- | license@php.net so we can mail you a copy immediately.               |
+ | license@swoole.com so we can mail you a copy immediately.            |
  +----------------------------------------------------------------------+
  | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
  +----------------------------------------------------------------------+
@@ -29,13 +29,11 @@
 
 typedef struct swReactorEpoll_s swReactorEpoll;
 
-#pragma pack(4)
 typedef struct _swFd
 {
     uint32_t fd;
     uint32_t fdtype;
 } swFd;
-#pragma pack()
 
 static int swReactorEpoll_add(swReactor *reactor, int fd, int fdtype);
 static int swReactorEpoll_set(swReactor *reactor, int fd, int fdtype);
@@ -109,7 +107,7 @@ int swReactorEpoll_create(swReactor *reactor, int max_event_num)
     return SW_OK;
 }
 
-void swReactorEpoll_free(swReactor *reactor)
+static void swReactorEpoll_free(swReactor *reactor)
 {
     swReactorEpoll *object = reactor->object;
     close(object->epfd);
@@ -117,7 +115,7 @@ void swReactorEpoll_free(swReactor *reactor)
     sw_free(object);
 }
 
-int swReactorEpoll_add(swReactor *reactor, int fd, int fdtype)
+static int swReactorEpoll_add(swReactor *reactor, int fd, int fdtype)
 {
     if (swReactor_add(reactor, fd, fdtype) < 0)
     {
@@ -146,7 +144,7 @@ int swReactorEpoll_add(swReactor *reactor, int fd, int fdtype)
     return SW_OK;
 }
 
-int swReactorEpoll_del(swReactor *reactor, int fd)
+static int swReactorEpoll_del(swReactor *reactor, int fd)
 {
     swReactorEpoll *object = reactor->object;
     int ret;
@@ -172,7 +170,7 @@ int swReactorEpoll_del(swReactor *reactor, int fd)
     return SW_OK;
 }
 
-int swReactorEpoll_set(swReactor *reactor, int fd, int fdtype)
+static int swReactorEpoll_set(swReactor *reactor, int fd, int fdtype)
 {
     swReactorEpoll *object = reactor->object;
     swFd fd_;
@@ -197,7 +195,7 @@ int swReactorEpoll_set(swReactor *reactor, int fd, int fdtype)
     return SW_OK;
 }
 
-int swReactorEpoll_wait(swReactor *reactor, struct timeval *timeo)
+static int swReactorEpoll_wait(swReactor *reactor, struct timeval *timeo)
 {
     swEvent event;
     swReactorEpoll *object = reactor->object;

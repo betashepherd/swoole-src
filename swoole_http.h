@@ -51,6 +51,9 @@ typedef struct
     uint32_t chunk :1;
     uint32_t keepalive :1;
 
+    uint32_t gzip_enable :1;
+    uint32_t gzip_level :4;
+
     uint32_t request_read :1;
     uint32_t current_header_name_allocated :1;
     uint32_t content_sender_initialized :1;
@@ -66,14 +69,13 @@ typedef struct
     char *current_header_name;
     size_t current_header_name_len;
 
-} http_client;
+} swoole_http_client;
 
 int swoole_websocket_onMessage(swEventData *req);
-int swoole_websocket_onHandshake(http_client *client);
-void swoole_websocket_onOpen(int fd);
+int swoole_websocket_onHandshake(swoole_http_client *client);
+void swoole_websocket_onOpen(swoole_http_client *client);
 int swoole_websocket_isset_onMessage(void);
-int swoole_websocket_handshake(http_client *client);
-void swoole_http_request_free(http_client *client TSRMLS_DC);
+void swoole_http_request_free(swoole_http_client *client TSRMLS_DC);
 
 extern zend_class_entry swoole_http_server_ce;
 extern zend_class_entry *swoole_http_server_class_entry_ptr;

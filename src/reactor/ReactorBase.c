@@ -8,7 +8,7 @@
   | http://www.apache.org/licenses/LICENSE-2.0.html                      |
   | If you did not receive a copy of the Apache2.0 license and are unable|
   | to obtain it through the world-wide-web, please send a note to       |
-  | license@php.net so we can mail you a copy immediately.               |
+  | license@swoole.com so we can mail you a copy immediately.            |
   +----------------------------------------------------------------------+
   | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
   +----------------------------------------------------------------------+
@@ -45,7 +45,7 @@ int swReactor_create(swReactor *reactor, int max_event)
 #elif defined(SW_MAINREACTOR_USE_POLL)
         ret = swReactorPoll_create(reactor, max_event);
 #else
-        ret = swReactorSelect_create(SwooleG.main_reactor);
+        ret = swReactorSelect_create(reactor);
 #endif
     }
 
@@ -185,6 +185,7 @@ static void swReactor_onTimeout(swReactor *reactor)
     if (reactor->disable_accept)
     {
         reactor->enable_accept(reactor);
+        reactor->disable_accept = 0;
     }
 }
 
@@ -235,14 +236,14 @@ int swReactor_write(swReactor *reactor, int fd, void *buf, int n)
     int ret;
     swConnection *socket = swReactor_get(reactor, fd);
     swBuffer *buffer = socket->out_buffer;
+    
+    if (socket->fd == 0)
+    {
+        socket->fd = fd;
+    }
 
     if (swBuffer_empty(buffer))
     {
-        if (socket->fd == 0)
-        {
-            socket->fd = fd;
-        }
-
         do_receive:
         ret = swConnection_send(socket, buf, n, 0);
 
@@ -271,14 +272,14 @@ int swReactor_write(swReactor *reactor, int fd, void *buf, int n)
 
             if (socket->events & SW_EVENT_READ)
             {
-                if (SwooleG.main_reactor->set(SwooleG.main_reactor, fd, socket->fdtype | socket->events) < 0)
+                if (reactor->set(reactor, fd, socket->fdtype | socket->events) < 0)
                 {
                     swSysError("reactor->set(%d, SW_EVENT_WRITE) failed.", fd);
                 }
             }
             else
             {
-                if (SwooleG.main_reactor->add(SwooleG.main_reactor, fd, socket->fdtype | SW_EVENT_WRITE) < 0)
+                if (reactor->add(reactor, fd, socket->fdtype | SW_EVENT_WRITE) < 0)
                 {
                     swSysError("reactor->add(%d, SW_EVENT_WRITE) failed.", fd);
                 }
@@ -359,6 +360,7 @@ int swReactor_onWrite(swReactor *reactor, swEvent *ev)
     {
         if (socket->events & SW_EVENT_READ)
         {
+            socket->events &= (~SW_EVENT_WRITE);
             if (reactor->set(reactor, fd, socket->fdtype | socket->events) < 0)
             {
                 swSysError("reactor->set(%d, SW_EVENT_READ) failed.", fd);

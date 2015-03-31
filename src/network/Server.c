@@ -8,7 +8,7 @@
   | http://www.apache.org/licenses/LICENSE-2.0.html                      |
   | If you did not receive a copy of the Apache2.0 license and are unable|
   | to obtain it through the world-wide-web, please send a note to       |
-  | license@php.net so we can mail you a copy immediately.               |
+  | license@swoole.com so we can mail you a copy immediately.            |
   +----------------------------------------------------------------------+
   | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
   +----------------------------------------------------------------------+
@@ -204,12 +204,18 @@ int swServer_master_onAccept(swReactor *reactor, swEvent *event)
                 }
             }
         }
+
         if (ret < 0)
         {
             bzero(conn, sizeof(swConnection));
             close(new_fd);
             return SW_OK;
         }
+
+#ifndef HAVE_ACCEPT4
+        swSetNonBlock(new_fd);
+#endif
+
 #ifdef SW_ACCEPT_AGAIN
         continue;
 #else
@@ -346,6 +352,8 @@ static int swServer_start_proxy(swServer *serv)
 	SwooleTG.id = 0;
 
 	SwooleG.main_reactor = main_reactor;
+	SwooleG.pid = getpid();
+	SwooleG.process_type = SW_PROCESS_MASTER;
 
 	main_reactor->id = serv->reactor_num; //设为一个特别的ID
 	main_reactor->ptr = serv;
@@ -376,7 +384,7 @@ int swServer_worker_init(swServer *serv, swWorker *worker)
         }
         else
         {
-            CPU_SET(worker->id %SW_CPU_NUM, &cpu_set);
+            CPU_SET(worker->id % SW_CPU_NUM, &cpu_set);
         }
         if (sched_setaffinity(getpid(), sizeof(cpu_set), &cpu_set) < 0)
         {
@@ -573,9 +581,6 @@ int swServer_start(swServer *serv)
     }
     //Signal Init
     swServer_signal_init();
-
-    //标识为主进程
-    SwooleG.process_type = SW_PROCESS_MASTER;
 
     if (serv->factory_mode == SW_MODE_SINGLE)
     {

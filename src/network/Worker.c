@@ -8,7 +8,7 @@
   | http://www.apache.org/licenses/LICENSE-2.0.html                      |
   | If you did not receive a copy of the Apache2.0 license and are unable|
   | to obtain it through the world-wide-web, please send a note to       |
-  | license@php.net so we can mail you a copy immediately.               |
+  | license@swoole.com so we can mail you a copy immediately.            |
   +----------------------------------------------------------------------+
   | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
   +----------------------------------------------------------------------+
@@ -115,7 +115,6 @@ int swWorker_onTask(swFactory *factory, swEventData *task)
     switch (task->info.type)
     {
     case SW_EVENT_TCP:
-    case SW_EVENT_PACKAGE_START:
     //ringbuffer shm package
     case SW_EVENT_PACKAGE:
         do_task:
@@ -152,6 +151,7 @@ int swWorker_onTask(swFactory *factory, swEventData *task)
         }
         break;
 
+    case SW_EVENT_PACKAGE_START:
     case SW_EVENT_PACKAGE_END:
         //input buffer
         package = SwooleWG.buffer_input[task->info.from_id];
@@ -410,15 +410,17 @@ int swWorker_send2reactor(swEventData *ev_data, size_t sendn, int fd)
 {
     int ret;
     swServer *serv = SwooleG.serv;
+
     /**
      * reactor_id: The fd in which the reactor.
      */
     int reactor_id = fd % serv->reactor_num;
-    int round_i = (SwooleWG.pipe_round++) % serv->reactor_pipe_num;
+    int pipe_index = fd % serv->reactor_pipe_num;
+
     /**
      * pipe_worker_id: The pipe in which worker.
      */
-    int pipe_worker_id = reactor_id + (round_i * serv->reactor_num);
+    int pipe_worker_id = reactor_id + (pipe_index * serv->reactor_num);
     swWorker *worker = swServer_get_worker(serv, pipe_worker_id);
 
     if (SwooleG.main_reactor)

@@ -8,7 +8,7 @@
  | http://www.apache.org/licenses/LICENSE-2.0.html                      |
  | If you did not receive a copy of the Apache2.0 license and are unable|
  | to obtain it through the world-wide-web, please send a note to       |
- | license@php.net so we can mail you a copy immediately.               |
+ | license@swoole.com so we can mail you a copy immediately.            |
  +----------------------------------------------------------------------+
  | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
  +----------------------------------------------------------------------+
@@ -164,9 +164,48 @@ int swHttpRequest_get_content_length(swHttpRequest *request)
             }
         }
     }
-    buffer->offset = p - buffer->str;
+
     return SW_ERR;
 }
+
+#ifdef SW_HTTP_100_CONTINUE
+int swHttpRequest_has_expect_header(swHttpRequest *request)
+{
+    swString *buffer = request->buffer;
+    //char *buf = buffer->str + buffer->offset;
+    char *buf = buffer->str;
+    //int len = buffer->length - buffer->offset;
+    int len = buffer->length;
+
+    char *pe = buf + len;
+    char *p;
+
+    for (p = buf; p < pe; p++)
+    {
+
+        if (*p == '\r' && *(p + 1) == '\n')
+        {
+            if (strncasecmp(p + 2, SW_STRL("Expect") - 1) == 0)
+            {
+                p += sizeof("Expect: ") + 1;
+                if (strncasecmp(p, SW_STRL("100-continue") - 1) == 0)
+                {
+                    return 1;
+                }
+                else
+                {
+                    return 0;
+                }
+            }
+            else
+            {
+                p++;
+            }
+        }
+    }
+    return 0;
+}
+#endif
 
 /**
  * POST get header-length

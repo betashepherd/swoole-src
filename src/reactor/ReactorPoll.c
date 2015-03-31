@@ -8,7 +8,7 @@
   | http://www.apache.org/licenses/LICENSE-2.0.html                      |
   | If you did not receive a copy of the Apache2.0 license and are unable|
   | to obtain it through the world-wide-web, please send a note to       |
-  | license@php.net so we can mail you a copy immediately.               |
+  | license@swoole.com so we can mail you a copy immediately.            |
   +----------------------------------------------------------------------+
   | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
   +----------------------------------------------------------------------+
@@ -22,6 +22,7 @@ static int swReactorPoll_set(swReactor *reactor, int fd, int fdtype);
 static int swReactorPoll_del(swReactor *reactor, int fd);
 static int swReactorPoll_wait(swReactor *reactor, struct timeval *timeo);
 static void swReactorPoll_free(swReactor *reactor);
+static int swReactorPoll_exist(swReactor *reactor, int fd);
 
 typedef struct _swPollFdInfo
 {
@@ -81,6 +82,12 @@ static void swReactorPoll_free(swReactor *reactor)
 
 static int swReactorPoll_add(swReactor *reactor, int fd, int fdtype)
 {
+    if (swReactorPoll_exist(reactor, fd))
+    {
+        swWarn("fd#%d is already exists.", fd);
+        return SW_ERR;
+    }
+
     if (swReactor_add(reactor, fd, fdtype) < 0)
     {
         return SW_ERR;
@@ -274,4 +281,18 @@ static int swReactorPoll_wait(swReactor *reactor, struct timeval *timeo)
 		}
 	}
 	return SW_OK;
+}
+
+static int swReactorPoll_exist(swReactor *reactor, int fd)
+{
+    swReactorPoll *object = reactor->object;
+    int i;
+    for (i = 0; i < reactor->event_num; i++)
+    {
+        if (object->events[i].fd == fd )
+        {
+            return SW_TRUE;
+        }
+    }
+    return SW_FALSE;
 }

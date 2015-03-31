@@ -56,25 +56,61 @@ int swFactory_notify(swFactory *factory, swDataHead *req)
 int swFactory_end(swFactory *factory, int fd)
 {
     swServer *serv = factory->ptr;
-    if (serv->onClose != NULL)
+    swSendData _send;
+
+    bzero(&_send, sizeof(_send));
+    _send.info.fd = fd;
+    _send.info.len = 0;
+    _send.info.type = SW_EVENT_CLOSE;
+
+    swConnection *conn = swWorker_get_connection(serv, fd);
+    if (conn == NULL || conn->active == 0)
     {
-        serv->onClose(serv, fd, 0);
+        //swWarn("can not close. Connection[%d] not found.", _send.info.fd);
+        return SW_ERR;
     }
-    return SwooleG.main_reactor->close(SwooleG.main_reactor, fd);
+    else if (conn->close_force)
+    {
+        goto do_close;
+    }
+    else if (conn->closing)
+    {
+        swWarn("The connection[%d] is closing.", fd);
+        return SW_ERR;
+    }
+    else if (conn->closed)
+    {
+        return SW_ERR;
+    }
+    else
+    {
+        do_close:
+        conn->closing = 1;
+        if (serv->onClose != NULL)
+        {
+            serv->onClose(serv, fd, conn->from_id);
+        }
+        conn->closing = 0;
+        conn->closed = 1;
+        return factory->finish(factory, &_send);
+    }
 }
 
 int swFactory_finish(swFactory *factory, swSendData *resp)
 {
-    int ret = 0;
-
-    resp->length = resp->info.len;
-    ret = swReactorThread_send(resp);
-
-    if (ret < 0)
+    if (resp->length == 0)
+    {
+        resp->length = resp->info.len;
+    }
+    if (swReactorThread_send(resp) < 0)
     {
         swSysError("sendto to connection#%d failed.", resp->info.fd);
+        return SW_ERR;
     }
-    return ret;
+    else
+    {
+        return SW_OK;
+    }
 }
 
 int swFactory_check_callback(swFactory *factory)

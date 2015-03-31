@@ -81,7 +81,6 @@ static sw_inline void* swReactorThread_alloc(swReactorThread *thread, uint32_t s
     return ptr;
 }
 
-
 #endif
 
 /**
@@ -89,43 +88,66 @@ static sw_inline void* swReactorThread_alloc(swReactorThread *thread, uint32_t s
 */
 static int swReactorThread_onPackage(swReactor *reactor, swEvent *event)
 {
+    int fd = event->fd;
     int ret;
-    swServer *serv = reactor->ptr;
-    swFactory *factory = &(serv->factory);
-    swDispatchData task;
 
-    struct sockaddr_in addr;
-    socklen_t addrlen = sizeof(addr);
-    while (1)
+    swServer *serv = SwooleG.serv;
+    swConnection *server_sock = &serv->connection_list[fd];
+    swDispatchData task;
+    swSocketAddress info;
+
+    info.len = sizeof(info.addr);
+    bzero(&task.data.info, sizeof(task.data.info));
+    task.data.info.from_fd = fd;
+
+    int socket_type = server_sock->socket_type;
+    int buffer_size;
+
+    //IPv4
+    if (socket_type == SW_SOCK_UDP)
     {
-        ret = recvfrom(event->fd, task.data.data, SW_BUFFER_SIZE, 0, (struct sockaddr *) &addr, &addrlen);
+        task.data.info.type = SW_EVENT_UDP;
+        buffer_size = SW_IPC_MAX_SIZE - sizeof(struct _swDataHead);
+    }
+    //IPv6
+    else
+    {
+        task.data.info.type = SW_EVENT_UDP6;
+        buffer_size = SW_IPC_MAX_SIZE - sizeof(struct _swDataHead) - sizeof(info.addr.inet_v6.sin6_addr);
+    }
+
+    ret = recvfrom(fd, task.data.data, buffer_size, 0, (struct sockaddr *) &info.addr, &info.len);
+    if (ret > 0)
+    {
+        //IPv4, swDataHead + data
+        if (socket_type == SW_SOCK_UDP)
+        {
+            //UDP的from_id是PORT，FD是IP
+            task.data.info.from_id = ntohs(info.addr.inet_v4.sin_port);
+            task.data.info.fd = info.addr.inet_v4.sin_addr.s_addr;
+            task.data.info.len = ret;
+        }
+        //IPv6, swDataHead + data + sin6_addr
+        else
+        {
+            task.data.info.from_id = ntohs(info.addr.inet_v6.sin6_port);
+            //fd record the offset
+            task.data.info.fd = ret;
+            memcpy(task.data.data + ret, &info.addr.inet_v6.sin6_addr, sizeof(info.addr.inet_v6.sin6_addr));
+            task.data.info.len = ret + sizeof(info.addr.inet_v6.sin6_addr);
+        }
+
+        task.target_worker_id = -1;
+
+        swTrace("recvfrom udp socket. fd=%d|data=%*s", fd, ret, task.data.data);
+        ret = serv->factory.dispatch(&serv->factory, &task);
         if (ret < 0)
         {
-            if (errno == EINTR)
-            {
-                continue;
-            }
-            return SW_ERR;
+            swWarn("factory->dispatch[udp packet] failed");
         }
-        break;
     }
-    task.data.info.len = ret;
 
-    //UDP的from_id是PORT，FD是IP
-    task.data.info.type = SW_EVENT_UDP;
-    task.data.info.from_fd = event->fd; //from fd
-    task.data.info.from_id = ntohs(addr.sin_port); //转换字节序
-    task.data.info.fd = addr.sin_addr.s_addr;
-    task.target_worker_id = -1;
-
-    swTrace("recvfrom udp socket.fd=%d|data=%s", event->fd, task.data.data);
-
-    ret = factory->dispatch(factory, &task);
-    if (ret < 0)
-    {
-        swWarn("factory->dispatch[udp packet] failed");
-    }
-    return SW_OK;
+    return ret;
 }
 
 /**
@@ -183,7 +205,7 @@ int swReactorThread_close(swReactor *reactor, int fd)
                 swHttpRequest *request = (swHttpRequest *) conn->object;
                 if (request->buffer)
                 {
-                    swTrace("ConnectionClose. free buffer=%p, request=%p\n", request->buffer, request);
+                    swTrace("Connection Close. free buffer=%p, request=%p\n", request->buffer, request);
                     swHttpRequest_free(conn, request);
                 }
             }
@@ -387,21 +409,26 @@ int swReactorThread_send(swSendData *_send)
     swSession *session = swServer_get_session(serv, session_id);
     fd = session->fd;
     swConnection *conn = swServer_connection_get(serv, fd);
-    if (!conn)
+    if (!conn || conn->active == 0)
     {
-        swWarn("send[%d] failed, the connection#%d[session=%d] is closed.", _send->info.type, fd, session_id);
+        if (_send->info.type == SW_EVENT_TCP)
+        {
+            swWarn("send %d byte failed, connection#%d[session=%d] is closed.", _send->length, fd, session_id);
+        }
+        else
+        {
+            swWarn("send [%d] failed, connection#%d[session=%d] is closed.", _send->info.type, fd, session_id);
+        }
         return SW_ERR;
     }
     if (session->id != session_id || conn->session_id != session_id)
     {
-        swWarn("send[%d] failed, the session#%d[socket=%d] has expired.", _send->info.type, session_id, conn->fd);
+        swWarn("send[%d] failed, session#%d[socket=%d] has expired.", _send->info.type, session_id, conn->fd);
         return SW_ERR;
     }
 #else
     fd = _send->info.fd;
     swConnection *conn = swServer_connection_get(serv, fd);
-#endif
-
     //The connection has been closed.
     if (conn == NULL || conn->active == 0)
     {
@@ -411,6 +438,7 @@ int swReactorThread_send(swSendData *_send)
         swWarn("connection#%d is not active, events=%d.", fd, _send->info.type);
         return SW_ERR;
     }
+#endif
 
     swReactor *reactor = &(serv->reactor_threads[conn->from_id].reactor);
 
@@ -472,12 +500,6 @@ int swReactorThread_send(swSendData *_send)
         }
     }
 
-    //listen EPOLLOUT event
-    if (reactor->set(reactor, fd, SW_EVENT_TCP | SW_EVENT_WRITE | SW_EVENT_READ) < 0 && (errno == EBADF || errno == ENOENT))
-    {
-        goto close_fd;
-    }
-
     swBuffer_trunk *trunk;
     //close connection
     if (_send->info.type == SW_EVENT_CLOSE)
@@ -508,6 +530,13 @@ int swReactorThread_send(swSendData *_send)
         //buffer enQueue
         swBuffer_append(conn->out_buffer, _send->data, _send->length);
     }
+
+    //listen EPOLLOUT event
+    if (reactor->set(reactor, fd, SW_EVENT_TCP | SW_EVENT_WRITE | SW_EVENT_READ) < 0 && (errno == EBADF || errno == ENOENT))
+    {
+        goto close_fd;
+    }
+
     return SW_OK;
 }
 
@@ -535,6 +564,11 @@ static int swReactorThread_onPipeWrite(swReactor *reactor, swEvent *ev)
             conn = swServer_connection_get(serv, send_data->info.fd);
             if (conn == NULL || conn->closed)
             {
+#ifdef SW_USE_RINGBUFFER
+                swPackage package;
+                memcpy(&package, send_data->data, sizeof(package));
+                thread->buffer_input->free(thread->buffer_input, package.data);
+#endif
                 swWarn("connection#%d is closed by server.", send_data->info.fd);
                 swBuffer_pop_trunk(buffer, trunk);
                 continue;
@@ -806,11 +840,10 @@ static int swReactorThread_onReceive_no_buffer(swReactor *reactor, swEvent *even
         task.target_worker_id = -1;
 
 #ifdef SW_USE_RINGBUFFER
+        swPackage package;
         if (serv->factory_mode == SW_MODE_PROCESS)
         {
             uint16_t target_worker_id = swServer_worker_schedule(serv, conn->fd);
-            swPackage package;
-
             package.length = task.data.info.len;
             package.data = swReactorThread_alloc(&serv->reactor_threads[SwooleTG.id], package.length);
             task.data.info.type = SW_EVENT_PACKAGE;
@@ -823,6 +856,14 @@ static int swReactorThread_onReceive_no_buffer(swReactor *reactor, swEvent *even
 #endif
         //dispatch to worker process
         ret = factory->dispatch(factory, &task);
+
+#ifdef SW_USE_RINGBUFFER
+        if (ret < 0)
+        {
+            swMemoryPool *pool = serv->reactor_threads[SwooleTG.id].buffer_input;
+            pool->free(pool, package.data);
+        }
+#endif
 
 #ifdef SW_USE_EPOLLET
         //缓存区还有数据没读完，继续读，EPOLL的ET模式
@@ -1491,9 +1532,38 @@ static int swReactorThread_onReceive_http_request(swReactor *reactor, swEvent *e
             }
             else
             {
-                swTrace("PostWait: request->content_length=%d, buffer->length=%zd, request->header_length=%d\n",
-                        request->content_length, buffer->length, request->header_length);
+#ifdef SW_HTTP_100_CONTINUE
+                //Expect: 100-continue
+                if (swHttpRequest_has_expect_header(request))
+                {
+                    swSendData _send;
+                    _send.data = "HTTP/1.1 100 Continue\r\n\r\n";
+                    _send.length = strlen(_send.data);
 
+                    int send_times = 0;
+                    direct_send:
+                    n = swConnection_send(conn, _send.data, _send.length, 0);
+                    if (n < _send.length)
+                    {
+                        _send.data += n;
+                        _send.length -= n;
+                        send_times++;
+                        if (send_times < 10)
+                        {
+                            goto direct_send;
+                        }
+                        else
+                        {
+                            swWarn("send http header failed");
+                        }
+                    }
+                }
+                else
+                {
+                    swTrace("PostWait: request->content_length=%d, buffer->length=%zd, request->header_length=%d\n",
+                            request->content_length, buffer->length, request->header_length);
+                }
+#endif
                 if (conn->http_buffered)
                 {
                     if (request->content_length > buffer->size && swString_extend(buffer, request->content_length) < 0)
@@ -1841,12 +1911,7 @@ static int swUDPThread_start(swServer *serv)
 */
 static int swReactorThread_loop_udp(swThreadParam *param)
 {
-    int ret;
-    swServer *serv = param->object;
-
-    swDispatchData task;
-    swSocketAddress info;
-    info.len = sizeof(info.addr);
+    swEvent event;
 
     int fd = param->pti;
 
@@ -1857,61 +1922,13 @@ static int swReactorThread_loop_udp(swThreadParam *param)
 
     swSignal_none();
 
-    swConnection *server_sock = &serv->connection_list[fd];
     //blocking
     swSetBlock(fd);
-
-    bzero(&task.data.info, sizeof(task.data.info));
-    task.data.info.from_fd = fd;
-
-    int socket_type = server_sock->socket_type;
-    int buffer_size;
-
-    //IPv4
-    if (socket_type == SW_SOCK_UDP)
-    {
-        task.data.info.type = SW_EVENT_UDP;
-        buffer_size = SW_IPC_MAX_SIZE - sizeof(struct _swDataHead);
-    }
-    //IPv6
-    else
-    {
-        task.data.info.type = SW_EVENT_UDP6;
-        buffer_size = SW_IPC_MAX_SIZE - sizeof(struct _swDataHead) - sizeof(info.addr.inet_v6.sin6_addr);
-    }
+    event.fd = fd;
 
     while (SwooleG.running == 1)
     {
-        ret = recvfrom(fd, task.data.data, buffer_size, 0, (struct sockaddr *) &info.addr, &info.len);
-        if (ret > 0)
-        {
-            //IPv4, swDataHead + data
-            if (socket_type == SW_SOCK_UDP)
-            {
-                //UDP的from_id是PORT，FD是IP
-                task.data.info.from_id = ntohs(info.addr.inet_v4.sin_port);
-                task.data.info.fd = info.addr.inet_v4.sin_addr.s_addr;
-                task.data.info.len = ret;
-            }
-            //IPv6, swDataHead + data + sin6_addr
-            else
-            {
-                task.data.info.from_id = ntohs(info.addr.inet_v6.sin6_port);
-                //fd record the offset
-                task.data.info.fd = ret;
-                memcpy(task.data.data + ret, &info.addr.inet_v6.sin6_addr, sizeof(info.addr.inet_v6.sin6_addr));
-                task.data.info.len = ret + sizeof(info.addr.inet_v6.sin6_addr);
-            }
-
-            task.target_worker_id = -1;
-
-            swTrace("recvfrom udp socket. fd=%d|data=%*s", fd, ret, task.data.data);
-            ret = serv->factory.dispatch(&serv->factory, &task);
-            if (ret < 0)
-            {
-                swWarn("factory->dispatch[udp packet] failed");
-            }
-        }
+        swReactorThread_onPackage(NULL, &event);
     }
     pthread_exit(0);
     return 0;
@@ -1924,6 +1941,8 @@ static int swReactorThread_send_string_buffer(swReactorThread *thread, swConnect
 
     task.data.info.fd = conn->fd;
     task.data.info.from_id = conn->from_id;
+
+    swTrace("send string package, size=%ldbytes.", buffer->length);
 
 #ifdef SW_USE_RINGBUFFER
     swServer *serv = SwooleG.serv;
@@ -1941,7 +1960,15 @@ static int swReactorThread_send_string_buffer(swReactorThread *thread, swConnect
     memcpy(package.data, buffer->str, package.length);
     memcpy(task.data.data, &package, sizeof(package));
 
-    return factory->dispatch(factory, &task);
+    //dispatch failed, free the memory.
+    if (factory->dispatch(factory, &task) < 0)
+    {
+        thread->buffer_input->free(thread->buffer_input, package.data);
+    }
+    else
+    {
+        return SW_OK;
+    }
 #else
 
     task.data.info.type = SW_EVENT_PACKAGE_START;
@@ -2024,7 +2051,15 @@ static int swReactorThread_send_in_buffer(swReactorThread *thread, swConnection 
     task.target_worker_id = target_worker_id;
     memcpy(task.data.data, &package, sizeof(package));
     //swWarn("[ReactorThread] copy_n=%d", package.length);
-    return factory->dispatch(factory, &task);
+    //dispatch failed, free the memory.
+    if (factory->dispatch(factory, &task) < 0)
+    {
+        thread->buffer_input->free(thread->buffer_input, package.data);
+    }
+    else
+    {
+        return SW_OK;
+    }
 #else
     int ret;
     task.data.info.type = SW_EVENT_PACKAGE_START;

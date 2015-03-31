@@ -1,7 +1,7 @@
 <?php
 $key_dir = dirname(dirname(__DIR__)).'/tests/ssl';
-$http = new swoole_http_server("0.0.0.0", 9501, SWOOLE_BASE);
-//$http = new swoole_http_server("0.0.0.0", 9501);
+//$http = new swoole_http_server("0.0.0.0", 9501, SWOOLE_BASE);
+$http = new swoole_http_server("0.0.0.0", 9501);
 //https
 //$http = new swoole_http_server("0.0.0.0", 9501, SWOOLE_BASE, SWOOLE_SOCK_TCP | SWOOLE_SSL);
 //$http->setGlobal(HTTP_GLOBAL_ALL, HTTP_GLOBAL_GET|HTTP_GLOBAL_POST|HTTP_GLOBAL_COOKIE);
@@ -10,7 +10,8 @@ $http->set([
 //    'open_tcp_nodelay' => true,
     //'task_worker_num' => 0,
     //'user' => 'www-data',
-    //'group' => 'www-data'
+    //'group' => 'www-data',
+//'daemonize' => true,
     //'ssl_cert_file' => $key_dir.'/ssl.crt',
     //'ssl_key_file' => $key_dir.'/ssl.key',
 ]);
@@ -26,7 +27,6 @@ function chunk(swoole_http_request $request, swoole_http_response $response)
 
 function no_chunk(swoole_http_request $request, swoole_http_response $response)
 {
-
 //	try
 //	{
 //		if (rand(1, 99) % 2 == 1)
@@ -49,15 +49,42 @@ function no_chunk(swoole_http_request $request, swoole_http_response $response)
     //$response->status(301);
     //$response->header("Location", "http://www.baidu.com/");
     //$response->cookie("hello", "world", time() + 3600);
-    $response->header("Content-Type", "text/html; charset=utf-8");
+//    $response->header("Content-Type", "text/html; charset=utf-8");
     //var_dump($request->rawContent());
     //var_dump($request->post);
 //    var_dump($request->get);
-    $response->end("<h1>Hello Swoole. #".rand(1000, 9999)."</h1>");
+
+//    echo strlen(gzdeflate("<h1>Hello Swoole.</h1>"));
+//    $response->end("<h1>Hello Swoole.</h1>");
+    //$response->end("<h1>Hello Swoole. #".str_repeat('A', rand(100, 999))."</h1>");
     //global $http;
     //$http->task("hello world");
+    $file = realpath(__DIR__.'/../'.$request->server['request_uri']);
+    if (is_file($file))
+    {
+        echo "http get file=$file\n";
+        if (substr($file, -4) == '.php')
+        {
+            $response->gzip();
+        }
+        else
+        {
+            $response->header('Content-Type', 'image/jpeg');
+        }
+        $content = file_get_contents($file);
+        echo "response size = ".strlen($content)."\n";
+
+//        $response->write($content);
+//        $response->end();
+
+        $response->end($content);
+    }
+    else
+    {
+        $response->end("<h1>Hello Swoole.</h1>");
+    }
 }
-$http->on('request', 'chunk');
+$http->on('request', 'no_chunk');
 
 $http->on('finish', function(){
     echo "task finish";

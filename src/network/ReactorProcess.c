@@ -8,7 +8,7 @@
  | http://www.apache.org/licenses/LICENSE-2.0.html                      |
  | If you did not receive a copy of the Apache2.0 license and are unable|
  | to obtain it through the world-wide-web, please send a note to       |
- | license@php.net so we can mail you a copy immediately.               |
+ | license@swoole.com so we can mail you a copy immediately.            |
  +----------------------------------------------------------------------+
  | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
  +----------------------------------------------------------------------+
@@ -138,7 +138,8 @@ int swReactorProcess_start(swServer *serv)
     /**
      * BASE模式，管理进程就是主进程
      */
-    SwooleGS->manager_pid = getpid();
+    SwooleG.pid = SwooleGS->manager_pid = getpid();
+    SwooleG.process_type = SW_PROCESS_MASTER;
 
     SwooleG.use_timerfd = 0;
     SwooleG.use_signalfd = 0;

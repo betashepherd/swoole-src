@@ -236,11 +236,9 @@ PHP_FUNCTION(swoole_event_add)
     }
 
     swConnection *socket = swReactor_get(SwooleG.main_reactor, socket_fd);
-
     socket->object = reactor_fd;
     socket->active = 1;
 
-    php_swoole_try_run_reactor();
     RETURN_LONG(socket_fd);
 }
 
@@ -249,7 +247,13 @@ PHP_FUNCTION(swoole_event_write)
     zval **fd;
     char *data;
     int len;
-
+    
+    if (!SwooleG.main_reactor)
+    {
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "reactor no ready, cannot swoole_event_write.");
+        RETURN_FALSE;
+    }
+    
     if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "Zs", &fd, &data, &len) == FAILURE)
     {
         return;
@@ -258,12 +262,6 @@ PHP_FUNCTION(swoole_event_write)
     if (len <= 0)
     {
         php_error_docref(NULL TSRMLS_CC, E_WARNING, "data empty.");
-        RETURN_FALSE;
-    }
-
-    if (!SwooleG.main_reactor)
-    {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "reactor no ready, cannot write.");
         RETURN_FALSE;
     }
 
@@ -292,6 +290,12 @@ PHP_FUNCTION(swoole_event_set)
 
     char *func_name = NULL;
     long event_flag = 0;
+    
+    if (!SwooleG.main_reactor)
+    {
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "reactor no ready, cannot swoole_event_set.");
+        RETURN_FALSE;
+    }
 
     if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "Z|zzl", &fd, &cb_read, &cb_write, &event_flag) == FAILURE)
     {
@@ -370,6 +374,13 @@ PHP_FUNCTION(swoole_event_set)
 PHP_FUNCTION(swoole_event_del)
 {
     zval **fd;
+    
+    if (!SwooleG.main_reactor)
+    {
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "reactor no ready, cannot swoole_event_del.");
+        RETURN_FALSE;
+    }
+    
     if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "Z", &fd) == FAILURE)
     {
         return;
@@ -400,6 +411,12 @@ PHP_FUNCTION(swoole_event_exit)
 
 PHP_FUNCTION(swoole_event_wait)
 {
+    if (!SwooleG.main_reactor)
+    {
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "reactor no ready, cannot use swoole_event_wait.");
+        RETURN_FALSE;
+    }
+    
     if (SwooleWG.in_client == 1 && SwooleWG.reactor_ready == 0 && SwooleG.running)
     {
         SwooleWG.reactor_ready = 1;

@@ -312,6 +312,7 @@ const zend_function_entry swoole_functions[] =
     PHP_FE(swoole_timer_add, arginfo_swoole_timer_add)
     PHP_FE(swoole_timer_del, arginfo_swoole_timer_del)
     PHP_FE(swoole_timer_after, NULL)
+    PHP_FE(swoole_timer_tick, NULL)
     PHP_FE(swoole_timer_clear, NULL)
     /*------swoole_async_io------*/
     PHP_FE(swoole_async_set, NULL)
@@ -358,7 +359,8 @@ static zend_function_entry swoole_server_methods[] = {
     PHP_FALIAS(deltimer, swoole_timer_del, arginfo_swoole_timer_del)
     PHP_FALIAS(gettimer, swoole_server_gettimer, NULL)
     PHP_FALIAS(after, swoole_timer_after, NULL)
-    PHP_FALIAS(clearAfter, swoole_timer_clear, NULL)
+    PHP_FALIAS(tick, swoole_timer_tick, NULL)
+    PHP_FALIAS(clearTimer, swoole_timer_clear, NULL)
     //process
     PHP_ME(swoole_server, sendmessage, NULL, ZEND_ACC_PUBLIC)
     PHP_ME(swoole_server, addprocess, NULL, ZEND_ACC_PUBLIC)
@@ -755,6 +757,29 @@ PHP_RSHUTDOWN_FUNCTION(swoole)
     if (swIsWorker())
     {
         swWorker_clean();
+    }
+
+    if (SwooleGS->start > 0 && SwooleG.running > 0)
+    {
+        if (PG(last_error_message))
+        {
+            switch(PG(last_error_type))
+            {
+            case E_ERROR:
+            case E_CORE_ERROR:
+            case E_USER_ERROR:
+            case E_COMPILE_ERROR:
+                swWarn("Fatal error: %s in %s on line %d.", PG(last_error_message),
+                        PG(last_error_file)?PG(last_error_file):"-", PG(last_error_lineno));
+                break;
+            default:
+                break;
+            }
+        }
+        else
+        {
+            swWarn("worker process is terminated by exit()/die().");
+        }
     }
 
     SwooleWG.reactor_wait_onexit = 0;
