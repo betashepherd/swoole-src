@@ -16,17 +16,22 @@ if($argc < 3) {
 	help();
 }
 $keys = array(
-	1=>'cmd', 2=>'key', 3=>'val'
+	1 => 'cmd',
+	2 => 'key',
+	3 => 'val'
 );
 $sends = array();
-foreach($keys as $i=>$key) {
-	if(isset($argv[$i])) {
+foreach ($keys as $i => $key)
+{
+	if (isset($argv[$i]))
+	{
 		$sends[$key] = $argv[$i];
 	}
 }
-if(empty($sends)) {
+if (empty($sends))
+{
 	help();
 }
-$client->send(json_encode($sends));
+$client->send(serialize($sends));
 $data = $client->recv();
 echo $data . PHP_EOL;

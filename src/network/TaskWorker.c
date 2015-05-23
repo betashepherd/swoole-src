@@ -29,6 +29,7 @@ void swTaskWorker_init(swProcessPool *pool)
     pool->onWorkerStop = swTaskWorker_onStop;
     pool->type = SW_PROCESS_TASKWORKER;
     pool->start_id = SwooleG.serv->worker_num;
+    pool->run_worker_num = SwooleG.task_worker_num;
 
     char *tmp_dir = swoole_dirname(SwooleG.task_tmpdir);
     //create tmp dir
@@ -38,7 +39,7 @@ void swTaskWorker_init(swProcessPool *pool)
     }
     free(tmp_dir);
 
-    if (SwooleG.task_dispatch_mode == SW_DISPATCH_QUEUE || SwooleG.task_ipc_mode == 3)
+    if (SwooleG.task_ipc_mode == SW_TASK_IPC_PREEMPTIVE)
     {
         pool->dispatch_mode = SW_DISPATCH_QUEUE;
     }
@@ -67,7 +68,6 @@ int swTaskWorker_onTask(swProcessPool *pool, swEventData *task)
     swServer *serv = pool->ptr;
     current_task = task;
 
-    SwooleWG.worker->status = SW_WORKER_BUSY;
     if (task->info.type == SW_EVENT_PIPE_MESSAGE)
     {
         serv->onPipeMessage(serv, task);
@@ -76,7 +76,6 @@ int swTaskWorker_onTask(swProcessPool *pool, swEventData *task)
     {
         ret = serv->onTask(serv, task);
     }
-    SwooleWG.worker->status = SW_WORKER_IDLE;
 
     return ret;
 }
@@ -88,19 +87,15 @@ int swTaskWorker_large_pack(swEventData *task, void *data, int data_len)
 
     memcpy(pkg.tmpfile, SwooleG.task_tmpdir, SwooleG.task_tmpdir_len);
 
-#ifdef HAVE_MKOSTEMP
-    int tpm_fd = mkostemp(pkg.tmpfile, O_WRONLY);
-#else
-    int tpm_fd = mkstemp(pkg.tmpfile);
-#endif
-
-    if (tpm_fd < 0)
+    //create temp file
+    int tmp_fd = swoole_tmpfile(pkg.tmpfile);
+    if (tmp_fd < 0)
     {
-        swWarn("mkdtemp(%s) failed. Error: %s[%d]", pkg.tmpfile, strerror(errno), errno);
         return SW_ERR;
     }
 
-    if (swoole_sync_writefile(tpm_fd, data, data_len) <= 0)
+    //write to file
+    if (swoole_sync_writefile(tmp_fd, data, data_len) <= 0)
     {
         swWarn("write to tmpfile failed.");
         return SW_ERR;
@@ -112,7 +107,7 @@ int swTaskWorker_large_pack(swEventData *task, void *data, int data_len)
 
     pkg.length = data_len;
     memcpy(task->data, &pkg, sizeof(swPackage_task));
-    close(tpm_fd);
+    close(tmp_fd);
     return SW_OK;
 }
 
@@ -131,6 +126,7 @@ void swTaskWorker_onStart(swProcessPool *pool, int worker_id)
     swServer *serv = pool->ptr;
     SwooleWG.id = worker_id;
 
+
     SwooleG.use_timer_pipe = 0;
     SwooleG.use_timerfd = 0;
 
@@ -138,6 +134,7 @@ void swTaskWorker_onStart(swProcessPool *pool, int worker_id)
     swWorker_onStart(serv);
 
     SwooleWG.worker = swProcessPool_get_worker(pool, worker_id);
+    SwooleWG.worker->status = SW_WORKER_IDLE;
 }
 
 void swTaskWorker_onStop(swProcessPool *pool, int worker_id)

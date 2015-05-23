@@ -55,7 +55,7 @@ swString *swString_dup2(swString *src)
     return dst;
 }
 
-swString *swString_dup(char *src_str, int length)
+swString *swString_dup(const char *src_str, int length)
 {
     swString *str = sw_malloc(sizeof(swString));
     if (str == NULL)
@@ -116,13 +116,14 @@ int swString_append_ptr(swString *str, char *append_str, int length)
 
 int swString_extend(swString *str, size_t new_size)
 {
-    assert (new_size > str->size);
-    str->str = sw_realloc(str->str, new_size);
-    if (str->str == NULL)
+    assert(new_size > str->size);
+    char *new_str = sw_realloc(str->str, new_size);
+    if (new_str == NULL)
     {
         swSysError("realloc(%ld) failed.", new_size);
         return SW_ERR;
     }
+    str->str = new_str;
     str->size = new_size;
     return SW_OK;
 }

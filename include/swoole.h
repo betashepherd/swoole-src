@@ -162,8 +162,7 @@ int daemon(int nochdir, int noclose);
 #define SW_DECLINED           -5
 #define SW_ABORT              -6
 //-------------------------------------------------------------------------------
-#define SW_TRUE                1
-#define SW_FALSE               0
+
 //-------------------------------------------------------------------------------
 enum swFd_type
 {
@@ -180,6 +179,13 @@ enum swFd_type
     SW_FD_DNS_RESOLVER    = 12, //dns resolver
     SW_FD_USER            = 15, //SW_FD_USER or SW_FD_USER+n: for custom event
 };
+
+enum swBool_type
+{
+    SW_TRUE = 1,
+    SW_FALSE = 0,
+};
+
 //-------------------------------------------------------------------------------
 enum swServer_mode
 {
@@ -222,34 +228,35 @@ enum swDispatchMode
     SW_DISPATCH_IPMOD = 4,
     SW_DISPATCH_UIDMOD = 5,
 };
+
 enum swWorkerStatus
 {
-    SW_WORKER_DEL = 2,
     SW_WORKER_BUSY = 1,
-    SW_WORKER_IDLE = 0,
+    SW_WORKER_IDLE = 2,
+    SW_WORKER_DEL  = 3,
 };
 //-------------------------------------------------------------------------------
 
-#define swWarn(str,...)        SwooleG.lock.lock(&SwooleG.lock);\
+#define swWarn(str,...)        SwooleGS->lock.lock(&SwooleGS->lock);\
 snprintf(sw_error,SW_ERROR_MSG_SIZE,"%s: "str,__func__,##__VA_ARGS__);\
 swLog_put(SW_LOG_WARN, sw_error);\
-SwooleG.lock.unlock(&SwooleG.lock)
+SwooleGS->lock.unlock(&SwooleGS->lock)
 
-#define swNotice(str,...)        SwooleG.lock.lock(&SwooleG.lock);\
+#define swNotice(str,...)        SwooleGS->lock.lock(&SwooleGS->lock);\
 snprintf(sw_error,SW_ERROR_MSG_SIZE,str,##__VA_ARGS__);\
 swLog_put(SW_LOG_NOTICE, sw_error);\
-SwooleG.lock.unlock(&SwooleG.lock)
+SwooleGS->lock.unlock(&SwooleGS->lock)
 
-#define swError(str,...)       SwooleG.lock.lock(&SwooleG.lock);\
+#define swError(str,...)       SwooleGS->lock.lock(&SwooleGS->lock);\
 snprintf(sw_error, SW_ERROR_MSG_SIZE, str, ##__VA_ARGS__);\
 swLog_put(SW_LOG_ERROR, sw_error);\
-SwooleG.lock.unlock(&SwooleG.lock);\
+SwooleGS->lock.unlock(&SwooleGS->lock);\
 exit(1)
 
-#define swSysError(str,...) SwooleG.lock.lock(&SwooleG.lock);\
-snprintf(sw_error,SW_ERROR_MSG_SIZE,"%s: "str" Error: %s[%d].",__func__,##__VA_ARGS__,strerror(errno),errno);\
+#define swSysError(str,...) SwooleGS->lock.lock(&SwooleGS->lock);\
+snprintf(sw_error,SW_ERROR_MSG_SIZE,"%s#%d: "str" Error: %s[%d].",__func__,__LINE__,##__VA_ARGS__,strerror(errno),errno);\
 swLog_put(SW_LOG_WARN, sw_error);\
-SwooleG.lock.unlock(&SwooleG.lock)
+SwooleGS->lock.unlock(&SwooleGS->lock)
 
 #ifdef SW_DEBUG_REMOTE_OPEN
 #define swDebug(str,...) int __debug_log_n = snprintf(sw_error,SW_ERROR_MSG_SIZE,str,##__VA_ARGS__);\
@@ -287,17 +294,17 @@ enum
 };
 
 #if SW_LOG_TRACE_OPEN == 1
-#define swTraceLog(id,str,...)      SwooleG.lock.lock(&SwooleG.lock);\
+#define swTraceLog(id,str,...)      SwooleGS->lock.lock(&SwooleGS->lock);\
 snprintf(sw_error,SW_ERROR_MSG_SIZE,"%s: "str,__func__,##__VA_ARGS__);\
 swLog_put(SW_LOG_TRACE, sw_error);\
-SwooleG.lock.unlock(&SwooleG.lock)
+SwooleGS->lock.unlock(&SwooleGS->lock)
 #elif SW_LOG_TRACE_OPEN == 0
 #define swTraceLog(id,str,...)
 #else
-#define swTraceLog(id,str,...)      if (id==SW_LOG_TRACE_OPEN) {SwooleG.lock.lock(&SwooleG.lock);\
+#define swTraceLog(id,str,...)      if (id==SW_LOG_TRACE_OPEN) {SwooleGS->lock.lock(&SwooleGS->lock);\
 snprintf(sw_error,SW_ERROR_MSG_SIZE,"%s: "str,__func__,##__VA_ARGS__);\
 swLog_put(SW_LOG_TRACE, sw_error);\
-SwooleG.lock.unlock(&SwooleG.lock);}
+SwooleGS->lock.unlock(&SwooleGS->lock);}
 #endif
 
 
@@ -318,8 +325,25 @@ typedef unsigned char uchar;
 typedef struct
 {
     uint32_t id;
-    int fd;
+    uint32_t fd :24;
+    uint32_t reactor_id :8;
 } swSession;
+
+typedef struct
+{
+    /* one package: eof check */
+
+    uint8_t package_eof_len;  //数据缓存结束符长度
+    char package_eof[SW_DATA_EOF_MAXLEN + 1];  //数据缓存结束符
+
+    char package_length_type;  //length field type
+    uint8_t package_length_size;
+    uint16_t package_length_offset;  //第几个字节开始表示长度
+    uint16_t package_body_offset;  //第几个字节开始计算长度
+
+    uint32_t package_max_length;
+
+} swProtocol;
 
 typedef struct
 {
@@ -342,7 +366,7 @@ typedef struct _swConnection
     /**
      * session id
      */
-    uint32_t session_id;
+    uint32_t session_id :24;
 
     /**
      * socket type, SW_SOCK_TCP or SW_SOCK_UDP
@@ -428,9 +452,11 @@ typedef struct _swConnection
     long uid;
 
     /**
-    *  upgarde websocket
-    */
+     *  upgarde websocket
+     */
     uint8_t websocket_status;
+
+    sw_atomic_t lock;
 
 #ifdef SW_USE_OPENSSL
     SSL *ssl;
@@ -466,7 +492,7 @@ static sw_inline void swString_clear(swString *str)
 }
 
 swString *swString_new(size_t size);
-swString *swString_dup(char *src_str, int length);
+swString *swString_dup(const char *src_str, int length);
 swString *swString_dup2(swString *src);
 
 void swString_print(swString *str);
@@ -571,7 +597,6 @@ void swQueueMsg_set_blocking(swQueue *p, uint8_t blocking);
 void swQueueMsg_set_destory(swQueue *p, uint8_t destory);
 
 //------------------Lock--------------------------------------
-
 enum SW_LOCKS
 {
     SW_RWLOCK = 1,
@@ -603,7 +628,6 @@ typedef struct _swMutex
 } swMutex;
 
 #ifdef HAVE_RWLOCK
-//读写锁
 typedef struct _swRWLock
 {
     pthread_rwlock_t _lock;
@@ -612,7 +636,6 @@ typedef struct _swRWLock
 } swRWLock;
 #endif
 
-//自旋锁
 #ifdef HAVE_SPINLOCK
 typedef struct _swSpinLock
 {
@@ -641,20 +664,20 @@ typedef struct _swLock
 #ifdef HAVE_RWLOCK
         swRWLock rwlock;
 #endif
-        swFileLock filelock;
-        swSem sem;
-        swAtomicLock atomlock;
 #ifdef HAVE_SPINLOCK
         swSpinLock spinlock;
 #endif
+        swFileLock filelock;
+        swSem sem;
+        swAtomicLock atomlock;
     } object;
 
-	int (*lock_rd)(struct _swLock *);
-	int (*lock)(struct _swLock *);
-	int (*unlock)(struct _swLock *);
-	int (*trylock_rd)(struct _swLock *);
-	int (*trylock)(struct _swLock *);
-	int (*free)(struct _swLock *);
+    int (*lock_rd)(struct _swLock *);
+    int (*lock)(struct _swLock *);
+    int (*unlock)(struct _swLock *);
+    int (*trylock_rd)(struct _swLock *);
+    int (*trylock)(struct _swLock *);
+    int (*free)(struct _swLock *);
 } swLock;
 
 //Thread Condition
@@ -695,7 +718,6 @@ typedef struct _swMemoryPool
 	void (*free)(struct _swMemoryPool *pool, void *ptr);
 	void (*destroy)(struct _swMemoryPool *pool);
 } swMemoryPool;
-
 
 typedef struct _swFixedPool_slice
 {
@@ -852,6 +874,60 @@ static sw_inline uint32_t swoole_unpack(char type, void *data)
     }
 }
 
+static inline char* swoole_strnstr(char *haystack, char *needle, uint32_t length)
+{
+    int i;
+    uint32_t needle_length = strlen(needle);
+    assert(needle_length > 0);
+
+    for (i = 0; i < (int) (length - needle_length + 1); i++)
+    {
+        if ((haystack[0] == needle[0]) && (0 == memcmp(haystack, needle, needle_length)))
+        {
+            return (char *) haystack;
+        }
+        haystack++;
+    }
+
+    return NULL;
+}
+
+static inline int swoole_strnpos(char *haystack, uint32_t haystack_length, char *needle, uint32_t needle_length)
+{
+    assert(needle_length > 0);
+    uint32_t i;
+
+    for (i = 0; i < (int) (haystack_length - needle_length + 1); i++)
+    {
+        if ((haystack[0] == needle[0]) && (0 == memcmp(haystack, needle, needle_length)))
+        {
+            return i;
+        }
+        haystack++;
+    }
+
+    return -1;
+}
+
+static inline int swoole_strrnpos(char *haystack, char *needle, uint32_t length)
+{
+    uint32_t needle_length = strlen(needle);
+    assert(needle_length > 0);
+    uint32_t i;
+    haystack += (length - needle_length);
+
+    for (i = length - needle_length; i > 0; i--)
+    {
+        if ((haystack[0] == needle[0]) && (0 == memcmp(haystack, needle, needle_length)))
+        {
+            return i;
+        }
+        haystack--;
+    }
+
+    return -1;
+}
+
 void swoole_dump_bin(char *data, char type, int size);
 int swoole_type_size(char type);
 int swoole_mkdir_recursive(const char *dir);
@@ -860,9 +936,10 @@ void swoole_dump_ascii(char *data, int size);
 int swoole_sync_writefile(int fd, void *data, int len);
 int swoole_sync_readfile(int fd, void *buf, int len);
 int swoole_system_random(int min, int max);
+long swoole_file_get_size(FILE *fp);
+int swoole_tmpfile(char *filename);
 swString* swoole_file_get_contents(char *filename);
 void swoole_open_remote_debug(void);
-int swoole_strnpos(char *haystack, char *needle, uint32_t length);
 char *swoole_dec2hex(int value, int base);
 
 void swoole_ioctl_set_block(int sock, int nonblock);
@@ -956,6 +1033,8 @@ struct swReactor_s
 
     uint32_t check_timer :1;
 
+    uint32_t running :1;
+
     /**
      * disable accept new connection
      */
@@ -1043,6 +1122,7 @@ struct _swWorker
     uint8_t ipc_mode;
 
     uint8_t deleted;
+    uint8_t child_process;
 
     /**
      * tasking num
@@ -1300,6 +1380,9 @@ int swThreadPool_create(swThreadPool *pool, int max_num);
 int swThreadPool_run(swThreadPool *pool);
 int swThreadPool_free(swThreadPool *pool);
 
+//--------------------------------protocol------------------------------
+int swProtocol_get_package_length(swProtocol *protocol, swConnection *conn, char *data, uint32_t size);
+
 //--------------------------------timer------------------------------
 typedef struct _swTimer_node
 {
@@ -1308,32 +1391,32 @@ typedef struct _swTimer_node
     void *data;
     uint32_t exec_msec;
     uint32_t interval;
-    uint32_t id;
+    long id;
     uint8_t remove;
 } swTimer_node;
 
 typedef struct _swTimer
 {
-	swTimer_node *root;
-	/*--------------timerfd & signal timer--------------*/
-	swHashMap *list;
-	int num;
-	int interval;
-	int use_pipe;
-	int lasttime;
-	int fd;
-    uint32_t round;
-	swPipe pipe;
-	/*-----------------for EventTimer-------------------*/
-	struct timeval basetime;
-	/*--------------------------------------------------*/
-    int (*add)(struct _swTimer *timer, int _msec, int _interval, void *data);
+    swTimer_node *root;
+    /*--------------timerfd & signal timer--------------*/
+    swHashMap *list;
+    int num;
+    int interval;
+    int use_pipe;
+    int lasttime;
+    int fd;
+    long _next_id;
+    swPipe pipe;
+    /*-----------------for EventTimer-------------------*/
+    struct timeval basetime;
+    /*--------------------------------------------------*/
+    long (*add)(struct _swTimer *timer, int _msec, int _interval, void *data);
     void* (*del)(struct _swTimer *timer, int _interval_ms, int id);
-	int (*select)(struct _swTimer *timer);
-	void (*free)(struct _swTimer *timer);
-	/*-----------------event callback-------------------*/
-	void (*onTimer)(struct _swTimer *timer, swTimer_node *event);
-	void (*onTimeout)(struct _swTimer *timer, swTimer_node *event);
+    int (*select)(struct _swTimer *timer);
+    void (*free)(struct _swTimer *timer);
+    /*-----------------event callback-------------------*/
+    void (*onTimer)(struct _swTimer *timer, swTimer_node *event);
+    void (*onTimeout)(struct _swTimer *timer, swTimer_node *event);
 } swTimer;
 
 int swTimer_init(int interval_ms, int no_pipe);
@@ -1348,9 +1431,9 @@ void swTimer_node_destory(swTimer_node **root);
 //--------------------------------------------------------------
 typedef struct _swModule
 {
-	char *name;
-	void (*test)(void);
-	int (*shutdown)(struct _swModule*);
+    char *name;
+    void (*test)(void);
+    int (*shutdown)(struct _swModule*);
 
 } swModule;
 
@@ -1362,8 +1445,13 @@ typedef struct
     pid_t master_pid;
     pid_t manager_pid;
 
+    uint32_t session_round :24;
     uint8_t start;  //after swServer_start will set start=1
+
     time_t now;
+
+    sw_atomic_t spinlock;
+    swLock lock;
 
     swProcessPool task_workers;
     swProcessPool event_workers;
@@ -1373,29 +1461,33 @@ typedef struct
 //Worker process global Variable
 typedef struct
 {
-	/**
-	 * Always run
-	 */
-	uint8_t run_always;
+    /**
+     * Always run
+     */
+    uint8_t run_always;
 
-	/**
-	 * Current Proccess Worker's id
-	 */
-	uint32_t id;
+    /**
+     * Current Proccess Worker's id
+     */
+    uint32_t id;
 
-	/**
-	 * pipe_worker
-	 */
-	int pipe_used;
+    /**
+     * pipe_worker
+     */
+    int pipe_used;
 
     uint32_t reactor_wait_onexit :1;
     uint32_t reactor_init :1;
     uint32_t reactor_ready :1;
     uint32_t in_client :1;
+    uint32_t shutdown :1;
 
-    int request_num;
+    uint32_t request_count;
 
-	swString **buffer_input;
+    int max_request;
+
+    swString **buffer_input;
+    swString **buffer_output;
     swWorker *worker;
 
 } swWorkerG;
@@ -1404,9 +1496,8 @@ typedef struct
 {
     uint16_t id;
     uint8_t type;
-	uint8_t factory_lock_target;
-	int16_t factory_target_worker;
-	sw_atomic_t worker_round_i;
+    uint8_t factory_lock_target;
+    int16_t factory_target_worker;
 } swThreadG;
 
 typedef struct _swServer swServer;
@@ -1417,7 +1508,6 @@ typedef struct
     swTimer timer;
 
     uint8_t running :1;
-
     uint8_t use_timerfd :1;
     uint8_t use_signalfd :1;
 
@@ -1430,7 +1520,7 @@ typedef struct
     int process_type;
     pid_t pid;
 
-    int signal_alarm; //for timer with message queue
+    int signal_alarm;  //for timer with message queue
     int signal_fd;
     int log_fd;
     int null_fd;
@@ -1447,19 +1537,17 @@ typedef struct
      *  task worker process num
      */
     uint16_t task_worker_num;
-     /**
-      *  task worker process max
-    */
+    /**
+     *  task worker process max
+     */
     uint16_t task_worker_max;
-    
     uint8_t task_recycle_num;
-    
     char *task_tmpdir;
     uint16_t task_tmpdir_len;
-    uint16_t cpu_num;
-
     uint8_t task_ipc_mode;
-    uint8_t task_dispatch_mode;
+    uint16_t task_max_request;
+
+    uint16_t cpu_num;
 
     uint32_t pagesize;
     uint32_t max_sockets;
@@ -1471,14 +1559,13 @@ typedef struct
 
     swServer *serv;
     swFactory *factory;
-    swLock lock;
 
     swMemoryPool *memory_pool;
     swReactor *main_reactor;
 
     swPipe *task_notify;
-    swEventData *task_result;
-
+    swEventData *task_result;    
+    
     pthread_t heartbeat_pidt;
 
 } swServerG;
@@ -1490,6 +1577,7 @@ typedef struct
     sw_atomic_t accept_count;
     sw_atomic_t close_count;
     sw_atomic_t tasking_num;
+    sw_atomic_t request_count;
 } swServerStats;
 
 extern swServerG SwooleG;              //Local Global Variable

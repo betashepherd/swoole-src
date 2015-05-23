@@ -78,7 +78,6 @@
 #define SW_HEARTBEAT_PING_LEN      8
 #define SW_HEARTBEAT_PONG_LEN      8
 
-#define SW_MAINREACTOR_TIMEO       1    //main reactor
 #define SW_MAINREACTOR_USE_UNSOCK  1    //主线程使用unsock
 #define SW_REACTOR_WRITER_TIMEO    3    //writer线程的reactor
 #define SW_TASKWAIT_TIMEOUT        0.5
@@ -120,6 +119,8 @@
 #define SW_REACTOR_USE_SESSION
 #define SW_SESSION_LIST_SIZE             (1024*1024)
 
+#define SW_MSGMAX                        8192
+
 /**
  * 最大Reactor线程数量，默认会启动CPU核数的线程数
  * 如果超过8核，默认启动8个线程
@@ -153,6 +154,7 @@
  */
 #define SW_BUFFER_OUTPUT_SIZE            (1024*1024*2)
 #define SW_BUFFER_INPUT_SIZE             (1024*1024*2)
+#define SW_PIPE_BUFFER_SIZE              (1024*1024*32)
 
 #define SW_MEMORY_POOL_SLAB_PAGE         10     //内存池的页数
 
@@ -203,11 +205,12 @@
 #define SW_HTTP_PARAM_MAX_NUM            128
 #define SW_HTTP_COOKIE_KEYLEN            128
 #define SW_HTTP_RESPONSE_INIT_SIZE       65536
+#define SW_HTTP_HEADER_MAX_SIZE          8192
 #define SW_HTTP_COMPRESS_GZIP
+#define SW_HTTP_UPLOAD_TMP_FILE          "/tmp/swoole.upfile.XXXXXX"
 //#define SW_HTTP_100_CONTINUE
 
 #define SW_WEBSOCKET_SERVER_SOFTWARE     "swoole-websocket-server"
 #define SW_WEBSOCKET_VERSION             "13"
-
 
 #endif /* SWOOLE_CONFIG_H_ */

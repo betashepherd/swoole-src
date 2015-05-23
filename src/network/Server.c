@@ -14,7 +14,6 @@
   +----------------------------------------------------------------------+
 */
 
-#include "swoole.h"
 #include "Server.h"
 #include "Http.h"
 #include "Connection.h"
@@ -93,7 +92,7 @@ int swServer_master_onAccept(swReactor *reactor, swEvent *event)
     socklen_t client_addrlen = sizeof(client_addr);
     swListenList_node *listen_host = serv->connection_list[event->fd].object;
 
-    int new_fd, ret, reactor_id = 0, i;
+    int new_fd = 0, ret, reactor_id = 0, i;
 
     //SW_ACCEPT_AGAIN
     for (i = 0; i < SW_ACCEPT_MAX_COUNT; i++)
@@ -121,6 +120,12 @@ int swServer_master_onAccept(swReactor *reactor, swEvent *event)
                 return SW_OK;
             }
         }
+#ifndef HAVE_ACCEPT4
+        else
+        {
+            swSetNonBlock(new_fd);
+        }
+#endif
 
         swTrace("[Master] Accept new connection. maxfd=%d|reactor_id=%d|conn=%d", swServer_get_maxfd(serv), reactor->id, new_fd);
 
@@ -132,20 +137,14 @@ int swServer_master_onAccept(swReactor *reactor, swEvent *event)
             return SW_OK;
         }
 
-#if SW_REACTOR_SCHEDULE == 1
-		//轮询分配
-		reactor_id = (serv->reactor_round_i++) % serv->reactor_num;
-#elif SW_REACTOR_SCHEDULE == 2
-		//使用fd取模来散列
-		reactor_id = new_fd % serv->reactor_num;
-#else
-		//平均调度法
-		reactor_id = serv->reactor_next_i;
-		if (serv->reactor_num > 1 && (serv->reactor_schedule_count++) % SW_SCHEDULE_INTERVAL == 0)
+		if (serv->factory_mode == SW_MODE_SINGLE)
 		{
-			swServer_reactor_schedule(serv);
+		    reactor_id = 0;
 		}
-#endif
+		else
+		{
+		    reactor_id = new_fd % serv->reactor_num;
+		}
 
 		//add to connection_list
         swConnection *conn = swServer_connection_new(serv, new_fd, event->fd, reactor_id);
@@ -162,6 +161,7 @@ int swServer_master_onAccept(swReactor *reactor, swEvent *event)
 				{
 					bzero(conn, sizeof(swConnection));
 					close(new_fd);
+					return SW_OK;
 				}
 			}
 			else
@@ -212,10 +212,6 @@ int swServer_master_onAccept(swReactor *reactor, swEvent *event)
             return SW_OK;
         }
 
-#ifndef HAVE_ACCEPT4
-        swSetNonBlock(new_fd);
-#endif
-
 #ifdef SW_ACCEPT_AGAIN
         continue;
 #else
@@ -237,6 +233,16 @@ static int swServer_start_check(swServer *serv)
     {
         swWarn("onReceive is null");
         return SW_ERR;
+    }
+    //disable notice when use SW_DISPATCH_ROUND and SW_DISPATCH_QUEUE
+    if (serv->factory_mode == SW_MODE_PROCESS)
+    {
+        if (serv->dispatch_mode == SW_DISPATCH_ROUND || serv->dispatch_mode == SW_DISPATCH_QUEUE)
+        {
+            serv->onConnect = NULL;
+            serv->onClose = NULL;
+            serv->disable_notify = 1;
+        }
     }
     //Timer
     if (SwooleG.timer.interval > 0 && serv->onTimer == NULL)
@@ -355,18 +361,20 @@ static int swServer_start_proxy(swServer *serv)
 	SwooleG.pid = getpid();
 	SwooleG.process_type = SW_PROCESS_MASTER;
 
-	main_reactor->id = serv->reactor_num; //设为一个特别的ID
+	/**
+	 * set a special id
+	 */
+	main_reactor->id = serv->reactor_num;
 	main_reactor->ptr = serv;
 	main_reactor->setHandle(main_reactor, SW_FD_LISTEN, swServer_master_onAccept);
 
-	//SW_START_SLEEP;
 	if (serv->onStart != NULL)
 	{
 		serv->onStart(serv);
 	}
 
 	struct timeval tmo;
-	tmo.tv_sec = SW_MAINREACTOR_TIMEO;
+	tmo.tv_sec = 1; //for seconds timer
 	tmo.tv_usec = 0;
 	return main_reactor->wait(main_reactor, &tmo);
 }
@@ -405,7 +413,7 @@ int swServer_worker_init(swServer *serv, swWorker *worker)
     int buffer_input_size;
     if (serv->open_eof_check || serv->open_length_check || serv->open_http_protocol)
     {
-        buffer_input_size = serv->package_max_length;
+        buffer_input_size = serv->protocol.package_max_length;
     }
     else
     {
@@ -429,10 +437,10 @@ int swServer_worker_init(swServer *serv, swWorker *worker)
     }
     else
     {
-        SwooleWG.request_num = serv->max_request;
-        if (SwooleWG.request_num > 10)
+        SwooleWG.max_request = serv->max_request;
+        if (SwooleWG.max_request > 10)
         {
-            SwooleWG.request_num += rand() % 10 * worker->id;
+            SwooleWG.max_request += swoole_system_random(1, 100);
         }
     }
 
@@ -514,7 +522,6 @@ int swServer_start(swServer *serv)
 	SwooleGS->start = 1;
 	SwooleGS->now = SwooleStats->start_time = time(NULL);
 
-	//设置factory回调函数
 	serv->factory.onTask = serv->onReceive;
 
 	if (serv->have_udp_sock == 1 && serv->factory_mode != SW_MODE_PROCESS)
@@ -562,7 +569,6 @@ int swServer_start(swServer *serv)
 	 */
     if (SwooleG.task_worker_num > 0 && serv->worker_num > 0)
     {
-
         SwooleG.task_result = sw_shm_calloc(serv->worker_num, sizeof(swEventData));
         SwooleG.task_notify = sw_calloc(serv->worker_num, sizeof(swPipe));
         for (i = 0; i < serv->worker_num; i++)
@@ -623,7 +629,6 @@ void swServer_init(swServer *serv)
     serv->max_connection = SwooleG.max_sockets;
 
     serv->max_request = 0;
-    serv->task_max_request = SW_MAX_REQUEST;
 
     serv->open_tcp_nopush = 1;
 
@@ -637,25 +642,27 @@ void swServer_init(swServer *serv)
     serv->heartbeat_check_interval = SW_HEARTBEAT_CHECK;
 
     char eof[] = SW_DATA_EOF;
-    serv->package_eof_len = sizeof(SW_DATA_EOF) - 1;
-    serv->package_length_type = 'N';
-    serv->package_length_size = 4;
-    serv->package_body_offset = 0;
+    serv->protocol.package_eof_len = sizeof(SW_DATA_EOF) - 1;
+    serv->protocol.package_length_type = 'N';
+    serv->protocol.package_length_size = 4;
+    serv->protocol.package_body_offset = 0;
 
-    serv->package_max_length = SW_BUFFER_INPUT_SIZE;
+    serv->protocol.package_max_length = SW_BUFFER_INPUT_SIZE;
 
     serv->buffer_input_size = SW_BUFFER_INPUT_SIZE;
     serv->buffer_output_size = SW_BUFFER_OUTPUT_SIZE;
 
-    memcpy(serv->package_eof, eof, serv->package_eof_len);
+    serv->pipe_buffer_size = SW_PIPE_BUFFER_SIZE;
+
+    memcpy(serv->protocol.package_eof, eof, serv->protocol.package_eof_len);
 }
 
 int swServer_create(swServer *serv)
 {
     //EOF最大长度为8字节
-    if (serv->package_eof_len > sizeof(serv->package_eof))
+    if (serv->protocol.package_eof_len > sizeof(serv->protocol.package_eof))
     {
-        serv->package_eof_len = sizeof(serv->package_eof);
+        serv->protocol.package_eof_len = sizeof(serv->protocol.package_eof);
     }
 
     //初始化日志
@@ -671,6 +678,15 @@ int swServer_create(swServer *serv)
 
     serv->factory.ptr = serv;
 
+#ifdef SW_REACTOR_USE_SESSION
+    serv->session_list = sw_shm_calloc(SW_SESSION_LIST_SIZE, sizeof(swSession));
+    if (serv->session_list == NULL)
+    {
+        swError("sw_shm_calloc(%ld) for session_list failed", SW_SESSION_LIST_SIZE * sizeof(swSession));
+        return SW_ERR;
+    }
+#endif
+
     //单进程单线程模式
     if (serv->factory_mode == SW_MODE_SINGLE)
     {
@@ -684,15 +700,18 @@ int swServer_create(swServer *serv)
 
 int swServer_shutdown(swServer *serv)
 {
-	//stop all thread
-	SwooleG.running = 0;
-	return SW_OK;
+    //stop all thread
+    SwooleG.main_reactor->running = 0;
+    return SW_OK;
 }
 
 int swServer_free(swServer *serv)
 {
     swNotice("Server is shutdown now.");
-    //factory释放
+
+    /**
+     * shutdown workers
+     */
     if (serv->factory.shutdown != NULL)
     {
         serv->factory.shutdown(&(serv->factory));
@@ -737,7 +756,7 @@ int swServer_free(swServer *serv)
     }
 #endif
 
-    //connection_list释放
+    //release connection_list
     if (serv->factory_mode == SW_MODE_SINGLE)
     {
         sw_free(serv->connection_list);
@@ -746,7 +765,11 @@ int swServer_free(swServer *serv)
     {
         sw_shm_free(serv->connection_list);
     }
-
+    //release session_list
+    if (serv->session_list)
+    {
+        sw_shm_free(serv->session_list);
+    }
     //close log file
     if (serv->log_file[0] != 0)
     {
@@ -814,8 +837,6 @@ int swServer_tcp_send(swServer *serv, int fd, void *data, uint32_t length)
 {
 	swSendData _send;
 	swFactory *factory = &(serv->factory);
-
-#ifndef SW_WORKER_SEND_CHUNK
 	/**
 	 * More than the output buffer
 	 */
@@ -841,45 +862,18 @@ int swServer_tcp_send(swServer *serv, int fd, void *data, uint32_t length)
         }
         return factory->finish(factory, &_send);
     }
-#else
-    char buffer[SW_BUFFER_SIZE];
-    int trunk_num = (length / SW_BUFFER_SIZE) + 1;
-    int send_n = 0, i, ret;
+	return SW_OK;
+}
 
-    swConnection *conn = swServer_connection_get(serv, fd);
-    if (conn == NULL || conn->active == 0)
+int swServer_tcp_sendwait(swServer *serv, int fd, void *data, uint32_t length)
+{
+    swConnection *conn = swServer_connection_verify(serv, fd);
+    if (!conn)
     {
-        swWarn("Connection[%d] has been closed.", fd);
+        swWarn("send %d byte failed, session#%d is closed.", length, fd);
         return SW_ERR;
     }
-
-    for (i = 0; i < trunk_num; i++)
-    {
-        //last chunk
-        if (i == (trunk_num - 1))
-        {
-            send_n = length % SW_BUFFER_SIZE;
-            if (send_n == 0)
-                break;
-        }
-        else
-        {
-            send_n = SW_BUFFER_SIZE;
-        }
-        memcpy(buffer, data + SW_BUFFER_SIZE * i, send_n);
-        _send.info.len = send_n;
-        ret = factory->finish(factory, &_send);
-
-#ifdef SW_WORKER_SENDTO_YIELD
-        if ((i % SW_WORKER_SENDTO_YIELD) == (SW_WORKER_SENDTO_YIELD - 1))
-        {
-            swYield();
-        }
-#endif
-    }
-    return ret;
-#endif
-	return SW_OK;
+    return swSocket_write_blocking(conn->fd, data, length);
 }
 
 /**
@@ -948,6 +942,12 @@ int swServer_add_listener(swServer *serv, int type, char *host, int port)
     if (serv->listen_port_num >= SW_MAX_LISTEN_PORT)
     {
         swWarn("allows up to %d ports to listen", SW_MAX_LISTEN_PORT);
+        return SW_ERR;
+    }
+
+    if (port < 1 || port > 65535)
+    {
+        swWarn("invalid port [%d]", port);
         return SW_ERR;
     }
 
@@ -1134,7 +1134,7 @@ static void swServer_signal_hanlder(int sig)
     switch (sig)
     {
     case SIGTERM:
-        SwooleG.running = 0;
+        SwooleG.main_reactor->running = 0;
         break;
     case SIGALRM:
         swTimer_signal_handler(SIGALRM);
@@ -1200,6 +1200,7 @@ static void swHeartbeatThread_loop(swThreadParam *param)
     swDataHead notify_ev;
     swFactory *factory = &serv->factory;
     swConnection *conn;
+    swReactor *reactor;
 
     int fd;
     int serv_max_fd;
@@ -1229,12 +1230,21 @@ static void swHeartbeatThread_loop(swThreadParam *param)
                 notify_ev.fd = fd;
                 notify_ev.from_id = conn->from_id;
                 conn->close_force = 1;
-                factory->notify(&serv->factory, &notify_ev);
+
+                if (serv->disable_notify)
+                {
+                    conn->close_wait = 1;
+                    reactor = &serv->reactor_threads[conn->from_id].reactor;
+                    reactor->set(reactor, fd, SW_FD_TCP | SW_EVENT_WRITE);
+                }
+                else
+                {
+                    factory->notify(&serv->factory, &notify_ev);
+                }
             }
         }
         sleep(serv->heartbeat_check_interval);
     }
-
 	pthread_exit(0);
 }
 
@@ -1276,7 +1286,7 @@ static swConnection* swServer_connection_new(swServer *serv, int fd, int from_fd
 #endif
 
     connection->fd = fd;
-    connection->from_id = reactor_id;
+    connection->from_id = serv->factory_mode == SW_MODE_SINGLE ? SwooleWG.id : reactor_id;
     connection->from_fd = from_fd;
     connection->connect_time = SwooleGS->now;
     connection->last_time = SwooleGS->now;
@@ -1292,15 +1302,16 @@ static swConnection* swServer_connection_new(swServer *serv, int fd, int from_fd
 #ifdef SW_REACTOR_USE_SESSION
     uint32_t session_id = 1;
     swSession *session;
+    sw_spinlock(&SwooleGS->spinlock);
     int i;
     //get session id
     for (i = 0; i < serv->max_connection; i++)
     {
-        session_id = (serv->session_round++) % SW_MAX_SOCKET_ID;
+        session_id = SwooleGS->session_round++;
         if (session_id == 0)
         {
             session_id = 1;
-            serv->session_round++;
+            SwooleGS->session_round = 1;
         }
         session = swServer_get_session(serv, session_id);
         //vacancy
@@ -1308,9 +1319,11 @@ static swConnection* swServer_connection_new(swServer *serv, int fd, int from_fd
         {
             session->fd = fd;
             session->id = session_id;
+            session->reactor_id = connection->from_id;
             break;
         }
     }
+    sw_spinlock_release(&SwooleGS->spinlock);
     connection->session_id = session_id;
 #endif
 

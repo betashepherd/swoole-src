@@ -20,6 +20,7 @@
 #define SWOOLE_HTTP_H_
 
 #include "thirdparty/php_http_parser.h"
+#include "thirdparty/multipart_parser.h"
 
 typedef struct
 {
@@ -63,11 +64,18 @@ typedef struct
 
     zval *zresponse;
     zval *zrequest;
+    zval *zserver;
 
     php_http_parser parser;
+	multipart_parser *mt_parser;
 
     char *current_header_name;
     size_t current_header_name_len;
+
+    char *current_input_name;
+    char *current_form_data_name;
+    size_t current_form_data_name_len;
+    char *current_form_data_value;
 
 } swoole_http_client;
 

@@ -25,29 +25,26 @@
 
 typedef struct _swClient
 {
-	int id;
-	int type;
-	int sock_type;
-	int sock_domain;
-	int protocol;
-	int reactor_fdtype;
+    int id;
+    int type;
+    int _sock_type;
+    int _sock_domain;
+    int _protocol;
+    int reactor_fdtype;
 
-	uint8_t async;
-	uint8_t keep;
-	uint8_t packet_mode;
+    uint32_t async :1;
+    uint32_t keep :1;
+    uint32_t packet_mode :1;
+    uint32_t open_eof_split :1;
 
-	uint8_t open_eof_check;
-	char *package_eof;
-	uint16_t package_eof_len;
+    /**
+     * one package: length check
+     */
+	uint32_t open_length_check: 1;
 
-	/* one package: length check */
-    uint8_t open_length_check;
+	uint32_t wait_data :1;
 
-    char package_length_type;
-    uint8_t package_length_size;
-    uint16_t package_length_offset;
-    uint16_t package_body_offset;
-    uint32_t package_max_length;
+	swProtocol protocol;
 
 	char *server_str;
 	void *ptr;
@@ -66,6 +63,9 @@ typedef struct _swClient
 	swSocketAddress remote_addr;
 
 	swConnection *socket;
+
+	swString *buffer;
+	uint32_t wait_length;
 
 	void (*onConnect)(struct _swClient *cli);
 	int (*onReceive)(struct _swClient *cli, swSendData *data);

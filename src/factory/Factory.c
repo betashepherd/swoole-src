@@ -44,12 +44,47 @@ int swFactory_shutdown(swFactory *factory)
 
 int swFactory_dispatch(swFactory *factory, swDispatchData *task)
 {
+    swServer *serv = SwooleG.serv;
     factory->last_from_id = task->data.info.from_id;
+
+    if (swEventData_is_stream(task->data.info.type))
+    {
+        swConnection *conn = swServer_connection_get(serv, task->data.info.fd);
+        if (conn == NULL || conn->active == 0)
+        {
+            swWarn("dispatch[type=%d] failed, connection#%d is not active.", task->data.info.type, task->data.info.fd);
+            return SW_ERR;
+        }
+        //server active close, discard data.
+        if (conn->closed)
+        {
+            swWarn("dispatch[type=%d] failed, connection#%d is closed by server.", task->data.info.type,
+                    task->data.info.fd);
+            return SW_OK;
+        }
+        //converted fd to session_id
+        task->data.info.fd = conn->session_id;
+    }
     return swWorker_onTask(factory, &task->data);
 }
 
 int swFactory_notify(swFactory *factory, swDataHead *req)
 {
+    swServer *serv = factory->ptr;
+    swConnection *conn = swServer_connection_get(serv, req->fd);
+    if (conn == NULL || conn->active == 0)
+    {
+        swWarn("dispatch[type=%d] failed, connection#%d is not active.", req->type, req->fd);
+        return SW_ERR;
+    }
+    //server active close, discard data.
+    if (conn->closed)
+    {
+        swWarn("dispatch[type=%d] failed, connection#%d is closed by server.", req->type, req->fd);
+        return SW_OK;
+    }
+    //converted fd to session_id
+    req->fd = conn->session_id;
     return swWorker_onTask(factory, (swEventData *) req);
 }
 
@@ -92,7 +127,18 @@ int swFactory_end(swFactory *factory, int fd)
         }
         conn->closing = 0;
         conn->closed = 1;
-        return factory->finish(factory, &_send);
+
+        if (swBuffer_empty(conn->out_buffer))
+        {
+            swReactor *reactor = &serv->reactor_threads[SwooleTG.id].reactor;
+            return swReactorThread_close(reactor, conn->fd);
+        }
+        else
+        {
+            swBuffer_trunk *trunk = swBuffer_new_trunk(conn->out_buffer, SW_CHUNK_CLOSE, 0);
+            trunk->store.data.val1 = _send.info.type;
+            return SW_OK;
+        }
     }
 }
 

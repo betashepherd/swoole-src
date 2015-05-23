@@ -28,19 +28,19 @@ typedef struct
 
 } swManagerProcess;
 
-static int swFactoryProcess_manager_loop(swFactory *factory);
-static int swFactoryProcess_manager_start(swFactory *factory);
-
-static int swFactoryProcess_worker_spawn(swFactory *factory, int worker_pti);
-
 static int swFactoryProcess_start(swFactory *factory);
 static int swFactoryProcess_notify(swFactory *factory, swDataHead *event);
 static int swFactoryProcess_dispatch(swFactory *factory, swDispatchData *buf);
 static int swFactoryProcess_finish(swFactory *factory, swSendData *data);
 static int swFactoryProcess_shutdown(swFactory *factory);
+static int swFactoryProcess_end(swFactory *factory, int fd);
 
+static int swManager_loop(swFactory *factory);
+static int swManager_start(swFactory *factory);
 static void swManager_signal_handle(int sig);
-static pid_t swManager_create_user_worker(swServer *serv, swWorker* worker);
+static pid_t swManager_spawn_user_worker(swServer *serv, swWorker* worker);
+static pid_t swManager_spawn_worker(swFactory *factory, int worker_id);
+static void swManager_check_exit_status(swServer *serv, int worker_id, pid_t pid, int status);
 
 static swManagerProcess ManagerProcess;
 
@@ -60,7 +60,7 @@ int swFactoryProcess_create(swFactory *factory, int worker_num)
     factory->start = swFactoryProcess_start;
     factory->notify = swFactoryProcess_notify;
     factory->shutdown = swFactoryProcess_shutdown;
-    factory->end = swFactory_end;
+    factory->end = swFactoryProcess_end;
     factory->onTask = NULL;
     factory->onFinish = NULL;
 
@@ -108,7 +108,7 @@ static int swFactoryProcess_start(swFactory *factory)
     serv->reactor_pipe_num = serv->worker_num / serv->reactor_num;
 
     //必须先启动manager进程组，否则会带线程fork
-    if (swFactoryProcess_manager_start(factory) < 0)
+    if (swManager_start(factory) < 0)
     {
         swWarn("swFactoryProcess_manager_start failed.");
         return SW_ERR;
@@ -119,7 +119,7 @@ static int swFactoryProcess_start(swFactory *factory)
 }
 
 //create worker child proccess
-static int swFactoryProcess_manager_start(swFactory *factory)
+static int swManager_start(swFactory *factory)
 {
     swFactoryProcess *object = factory->object;
     int i, ret;
@@ -149,19 +149,22 @@ static int swFactoryProcess_manager_start(swFactory *factory)
     if (SwooleG.task_worker_num > 0)
     {
         key_t key = 0;
-        if (SwooleG.task_ipc_mode == SW_IPC_MSGQUEUE)
+        int create_pipe = 1;
+
+        if (SwooleG.task_ipc_mode > SW_TASK_IPC_UNIXSOCK)
         {
             key = serv->message_queue_key + 2;
+            create_pipe = 0;
         }
 
-        int task_num = SwooleG.task_worker_max > 0 ? SwooleG.task_worker_max : SwooleG.task_worker_num;
         //启动min个.此时的pool->worker_num相当于max
-        if (swProcessPool_create(&SwooleGS->task_workers, task_num, serv->task_max_request, key, 1) < 0)
+        int task_num = SwooleG.task_worker_max > 0 ? SwooleG.task_worker_max : SwooleG.task_worker_num;
+
+        if (swProcessPool_create(&SwooleGS->task_workers, task_num, SwooleG.task_max_request, key, create_pipe) < 0)
         {
             swWarn("[Master] create task_workers failed.");
             return SW_ERR;
         }
-        SwooleGS->task_workers.run_worker_num = SwooleG.task_worker_num;
 
         swProcessPool *pool = &SwooleGS->task_workers;
         swTaskWorker_init(pool);
@@ -199,7 +202,7 @@ static int swFactoryProcess_manager_start(swFactory *factory)
         for (i = 0; i < serv->worker_num; i++)
         {
             //close(worker_pipes[i].pipes[0]);
-            pid = swFactoryProcess_worker_spawn(factory, i);
+            pid = swManager_spawn_worker(factory, i);
             if (pid < 0)
             {
                 swError("fork() failed.");
@@ -234,7 +237,7 @@ static int swFactoryProcess_manager_start(swFactory *factory)
                 {
                     swServer_pipe_set(serv, user_worker->worker->pipe_object);
                 }
-                swManager_create_user_worker(serv, user_worker->worker);
+                swManager_spawn_user_worker(serv, user_worker->worker);
             }
         }
 
@@ -242,7 +245,7 @@ static int swFactoryProcess_manager_start(swFactory *factory)
         SwooleG.process_type = SW_PROCESS_MANAGER;
         SwooleG.pid = getpid();
 
-        ret = swFactoryProcess_manager_loop(factory);
+        ret = swManager_loop(factory);
         exit(ret);
         break;
 
@@ -257,7 +260,7 @@ static int swFactoryProcess_manager_start(swFactory *factory)
     return SW_OK;
 }
 
-static pid_t swManager_create_user_worker(swServer *serv, swWorker* worker)
+static pid_t swManager_spawn_user_worker(swServer *serv, swWorker* worker)
 {
     pid_t pid = fork();
 
@@ -372,7 +375,7 @@ static void swManager_signal_handle(int sig)
     }
 }
 
-static int swFactoryProcess_manager_loop(swFactory *factory)
+static int swManager_loop(swFactory *factory)
 {
     int pid, new_pid;
     int i;
@@ -465,19 +468,11 @@ static int swFactoryProcess_manager_loop(swFactory *factory)
                 }
                 else
                 {
-                    if (!WIFEXITED(status))
-                    {
-                        swWarn("worker#%d abnormal exit, status=%d, signal=%d", i, WEXITSTATUS(status), WTERMSIG(status));
-
-                        if (serv->onWorkerError != NULL)
-                        {
-                            serv->onWorkerError(serv, i, pid, WEXITSTATUS(status));
-                        }
-                    }
+                    swManager_check_exit_status(serv, i, pid, status);
                     pid = 0;
                     while (1)
                     {
-                        new_pid = swFactoryProcess_worker_spawn(factory, i);
+                        new_pid = swManager_spawn_worker(factory, i);
                         if (new_pid < 0)
                         {
                             usleep(100000);
@@ -491,31 +486,35 @@ static int swFactoryProcess_manager_loop(swFactory *factory)
                     }
                 }
             }
-
-            //task worker
+            
             if (pid > 0)
             {
-                swWorker *exit_worker = swHashMap_find_int(SwooleGS->task_workers.map, pid);
-
-                if (exit_worker != NULL)
+                swWorker *exit_worker;
+                //task worker
+                if (SwooleGS->task_workers.map)
                 {
-                    if (exit_worker->deleted == 1)  //主动回收不重启
+                    exit_worker = swHashMap_find_int(SwooleGS->task_workers.map, pid);
+                    if (exit_worker != NULL)
                     {
-                        exit_worker->deleted = 0;
-                    }
-                    else
-                    {
-                        swProcessPool_spawn(exit_worker);
-                        goto kill_worker;
+                        swManager_check_exit_status(serv, exit_worker->id, pid, status);
+                        if (exit_worker->deleted == 1)  //主动回收不重启
+                        {
+                            exit_worker->deleted = 0;
+                        }
+                        else
+                        {
+                            swProcessPool_spawn(exit_worker);
+                            goto kill_worker;
+                        }
                     }
                 }
-
+                //user process
                 if (serv->user_worker_map != NULL)
                 {
                     exit_worker = swHashMap_find_int(serv->user_worker_map, pid);
                     if (exit_worker != NULL)
                     {
-                        swManager_create_user_worker(serv, exit_worker);
+                        swManager_spawn_user_worker(serv, exit_worker);
                         goto kill_worker;
                     }
                 }
@@ -549,6 +548,16 @@ static int swFactoryProcess_manager_loop(swFactory *factory)
         kill(serv->workers[i].pid, SIGTERM);
     }
 
+    //wait child process
+    for (i = 0; i < serv->worker_num; i++)
+    {
+        if (swWaitpid(serv->workers[i].pid, &status, 0) < 0)
+        {
+            swSysError("waitpid(%d) failed.", serv->workers[i].pid);
+        }
+    }
+
+    //kill and wait task process
     if (SwooleG.task_worker_num > 0)
     {
         swProcessPool_shutdown(&SwooleGS->task_workers);
@@ -556,10 +565,11 @@ static int swFactoryProcess_manager_loop(swFactory *factory)
 
     if (serv->user_worker_map)
     {
-        swWorker* user_worker= NULL;
+        swWorker* user_worker;
         uint64_t key;
 
-        do
+        //kill user process
+        while (1)
         {
             user_worker = swHashMap_each_int(serv->user_worker_map, &key);
             //hashmap empty
@@ -568,7 +578,22 @@ static int swFactoryProcess_manager_loop(swFactory *factory)
                 break;
             }
             kill(user_worker->pid, SIGTERM);
-        } while (user_worker);
+        }
+
+        //wait user process
+        while (1)
+        {
+            user_worker = swHashMap_each_int(serv->user_worker_map, &key);
+            //hashmap empty
+            if (user_worker == NULL)
+            {
+                break;
+            }
+            if (swWaitpid(user_worker->pid, &status, 0) < 0)
+            {
+                swSysError("waitpid(%d) failed.", serv->workers[i].pid);
+            }
+        }
     }
 
     if (serv->onManagerStop)
@@ -579,7 +604,7 @@ static int swFactoryProcess_manager_loop(swFactory *factory)
     return SW_OK;
 }
 
-static int swFactoryProcess_worker_spawn(swFactory *factory, int worker_pti)
+static pid_t swManager_spawn_worker(swFactory *factory, int worker_id)
 {
     pid_t pid;
     int ret;
@@ -595,7 +620,7 @@ static int swFactoryProcess_worker_spawn(swFactory *factory, int worker_pti)
     //worker child processor
     else if (pid == 0)
     {
-        ret = swWorker_loop(factory, worker_pti);
+        ret = swWorker_loop(factory, worker_id);
         exit(ret);
     }
     //parent,add to writer
@@ -614,8 +639,8 @@ static int swFactoryProcess_finish(swFactory *factory, swSendData *resp)
     swServer *serv = factory->ptr;
     int fd = resp->info.fd;
 
-    swConnection *conn = swWorker_get_connection(serv, fd);
-    if (conn == NULL || conn->active == 0)
+    swConnection *conn = swServer_connection_verify(serv, fd);
+    if (!conn)
     {
         swWarn("session#%d does not exist.", fd);
         return SW_ERR;
@@ -672,11 +697,7 @@ static int swFactoryProcess_finish(swFactory *factory, swSendData *resp)
         ev_data.info.from_fd = SW_RESPONSE_SMALL;
     }
 
-#if SW_REACTOR_SCHEDULE == 2
-    ev_data.info.from_id = fd % serv->reactor_num;
-#else
     ev_data.info.from_id = conn->from_id;
-#endif
 
     sendn = ev_data.info.len + sizeof(resp->info);
     swTrace("[Worker] send: sendn=%d|type=%d|content=%s", sendn, resp->info.type, resp->data);
@@ -769,12 +790,72 @@ static int swFactoryProcess_dispatch(swFactory *factory, swDispatchData *task)
         //server active close, discard data.
         if (conn->closed)
         {
-            swWarn("dispatch[type=%d] failed, connection#%d is closed by server.", task->data.info.type,
-                    task->data.info.fd);
-            return SW_OK;
+            if (!(task->data.info.type == SW_EVENT_CLOSE && conn->close_force))
+            {
+                swWarn("dispatch[type=%d] failed, connection#%d[session_id=%d] is closed by server.",
+                        task->data.info.type, task->data.info.fd, conn->session_id);
+                return SW_OK;
+            }
         }
+        //converted fd to session_id
+        task->data.info.fd = conn->session_id;
     }
 
     return swReactorThread_send2worker((void *) &(task->data), send_len, target_worker_id);
 }
 
+static int swFactoryProcess_end(swFactory *factory, int fd)
+{
+    swServer *serv = factory->ptr;
+    swSendData _send;
+
+    bzero(&_send, sizeof(_send));
+    _send.info.fd = fd;
+    _send.info.len = 0;
+    _send.info.type = SW_EVENT_CLOSE;
+
+    swConnection *conn = swWorker_get_connection(serv, fd);
+    if (conn == NULL || conn->active == 0)
+    {
+        //swWarn("can not close. Connection[%d] not found.", _send.info.fd);
+        return SW_ERR;
+    }
+    else if (conn->close_force)
+    {
+        goto do_close;
+    }
+    else if (conn->closing)
+    {
+        swWarn("The connection[%d] is closing.", fd);
+        return SW_ERR;
+    }
+    else if (conn->closed)
+    {
+        return SW_ERR;
+    }
+    else
+    {
+        do_close:
+        conn->closing = 1;
+        if (serv->onClose != NULL)
+        {
+            serv->onClose(serv, fd, conn->from_id);
+        }
+        conn->closing = 0;
+        conn->closed = 1;
+        return factory->finish(factory, &_send);
+    }
+}
+
+static void swManager_check_exit_status(swServer *serv, int worker_id, pid_t pid, int status)
+{
+    if (!WIFEXITED(status))
+    {
+        swWarn("worker#%d abnormal exit, status=%d, signal=%d", worker_id, WEXITSTATUS(status), WTERMSIG(status));
+
+        if (serv->onWorkerError != NULL)
+        {
+            serv->onWorkerError(serv, worker_id, pid, WEXITSTATUS(status));
+        }
+    }
+}

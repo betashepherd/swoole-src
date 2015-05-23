@@ -26,8 +26,6 @@ extern "C" {
 #endif
 
 #define SW_REACTOR_NUM             SW_CPU_NUM
-#define SW_WRITER_NUM              SW_CPU_NUM
-#define SW_PIPES_NUM               (SW_WORKER_NUM/SW_WRITER_NUM + 1) //每个写线程pipes数组大小
 #define SW_WORKER_NUM              (SW_CPU_NUM*2)
 
 #define SW_HEARTBEAT_IDLE          0   //心跳存活最大时间
@@ -57,6 +55,9 @@ enum swEventType
     SW_EVENT_UNIX_STREAM     = 14,
     //pipe
     SW_EVENT_PIPE_MESSAGE    = 15,
+    //proxy
+    SW_EVENT_PROXY_START     = 16,
+    SW_EVENT_PROXY_END       = 17,
 };
 
 #define SW_HOST_MAXSIZE            128
@@ -68,6 +69,13 @@ enum swIPCMode
 	SW_IPC_UNSOCK   = 1,
 	SW_IPC_MSGQUEUE = 2,
 	SW_IPC_CHANNEL  = 3,
+};
+
+enum swTaskIPCMode
+{
+    SW_TASK_IPC_UNIXSOCK    = 1,
+    SW_TASK_IPC_MSGQUEUE    = 2,
+    SW_TASK_IPC_PREEMPTIVE  = 3,
 };
 
 enum swCloseType
@@ -111,7 +119,6 @@ typedef struct _swReactorThread
     swReactor reactor;
     swUdpFd *udp_addrs;
     swMemoryPool *buffer_input;
-    swArray *buffer_pipe;
 #ifdef SW_USE_RINGBUFFER
     int *pipe_read_list;
 #endif
@@ -199,11 +206,7 @@ int swFactory_end(swFactory *factory, int fd);
 int swFactory_check_callback(swFactory *factory);
 
 int swFactoryProcess_create(swFactory *factory, int worker_num);
-
-
 int swFactoryThread_create(swFactory *factory, int writer_num);
-int swFactoryThread_start(swFactory *factory);
-int swFactoryThread_shutdown(swFactory *factory);
 
 
 //------------------------------------Server-------------------------------------------
@@ -251,10 +254,6 @@ struct _swServer
      * worker process max request
      */
     uint32_t max_request;
-    /**
-     * task worker process max request
-     */
-    uint32_t task_max_request;
 
     int timeout_sec;
     int timeout_usec;
@@ -277,7 +276,7 @@ struct _swServer
     uint16_t reactor_next_i; //平均算法调度
     uint16_t reactor_schedule_count;
 
-    uint16_t worker_round_id;
+    sw_atomic_t worker_round_id;
 
     /**
      * run as a daemon process
@@ -320,6 +319,11 @@ struct _swServer
     uint32_t open_eof_check :1;
 
     /**
+     * split the package use eof
+     */
+    uint32_t open_eof_split :1;
+
+    /**
      * built-in http protocol
      */
     uint32_t open_http_protocol :1;
@@ -343,6 +347,21 @@ struct _swServer
      * Use data key as factory->dispatch() param.
      */
     uint32_t open_dispatch_key :1;
+
+    /**
+     * Udisable notice when use SW_DISPATCH_ROUND and SW_DISPATCH_QUEUE
+     */
+    uint32_t disable_notify :1;
+
+    /**
+     * discard the timeout request
+     */
+    uint32_t discard_timeout_request :1;
+
+    /**
+     * save error packets to file system
+     */
+    uint32_t save_error_packet :1;
 
     /**
      * open tcp_defer_accept option
@@ -369,30 +388,16 @@ struct _swServer
     /**
      * 来自客户端的心跳侦测包
      */
-    char heartbeat_ping[SW_HEARTBEAT_PING_LEN];
+    char heartbeat_ping[SW_HEARTBEAT_PING_LEN + 1];
     uint8_t heartbeat_ping_length;
 
     /**
      * 服务器端对心跳包的响应
      */
-    char heartbeat_pong[SW_HEARTBEAT_PING_LEN];
+    char heartbeat_pong[SW_HEARTBEAT_PING_LEN + 1];
     uint8_t heartbeat_pong_length;
 
-    /* one package: eof check */
-
-    uint8_t package_eof_len; //数据缓存结束符长度
-    //int data_buffer_max_num;             //数据缓存最大个数(超过此数值的连接会被当作坏连接，将清除缓存&关闭连接)
-    //uint8_t max_trunk_num;               //每个请求最大允许创建的trunk数
-    char package_eof[SW_DATA_EOF_MAXLEN]; //数据缓存结束符
-
-    uint32_t http_max_post_size;
-
-
-    char package_length_type; //length field type
-    uint8_t package_length_size;
-    uint16_t package_length_offset; //第几个字节开始表示长度
-    uint16_t package_body_offset; //第几个字节开始计算长度
-    uint32_t package_max_length;
+    swProtocol protocol;
 
     uint8_t dispatch_key_size;
     uint16_t dispatch_key_offset;
@@ -401,6 +406,8 @@ struct _swServer
     /* buffer output/input setting*/
     uint32_t buffer_output_size;
     uint32_t buffer_input_size;
+
+    uint32_t pipe_buffer_size;
 
 #ifdef SW_USE_OPENSSL
     uint8_t open_ssl;
@@ -421,9 +428,12 @@ struct _swServer
     swReactorThread *reactor_threads;
     swWorker *workers;
 
+#ifdef HAVE_PTHREAD_BARRIER
+    pthread_barrier_t barrier;
+#endif
+
     swConnection *connection_list;  //连接列表
     swSession *session_list;
-    uint32_t session_round;
 
     int connection_list_capacity; //超过此容量，会自动扩容
 
@@ -452,7 +462,7 @@ struct _swServer
     int (*onTask)(swServer *serv, swEventData *data);
     int (*onFinish)(swServer *serv, swEventData *data);
 
-    int (*get_package_length)(swServer *serv, swConnection *conn, char *data, uint32_t length);
+    int (*get_package_length)(swProtocol *protocol, swConnection *conn, char *data, uint32_t length);
 };
 
 typedef struct _swSocketLocal
@@ -496,6 +506,7 @@ int swServer_shutdown(swServer *serv);
 
 int swServer_udp_send(swServer *serv, swSendData *resp);
 int swServer_tcp_send(swServer *serv, int fd, void *data, uint32_t length);
+int swServer_tcp_sendwait(swServer *serv, int fd, void *data, uint32_t length);
 
 //UDP, UDP必然超过0x1000000
 //原因：IPv4的第4字节最小为1,而这里的conn_fd是网络字节序
@@ -525,8 +536,22 @@ static sw_inline int swEventData_is_stream(uint8_t type)
     case SW_EVENT_PACKAGE_START:
     case SW_EVENT_PACKAGE:
     case SW_EVENT_PACKAGE_END:
+    case SW_EVENT_CONNECT:
+    case SW_EVENT_CLOSE:
         return SW_TRUE;
     default:
+        return SW_FALSE;
+    }
+}
+
+static sw_inline int swServer_package_integrity(swServer *serv)
+{
+    if (serv->open_eof_check || serv->open_length_check || serv->open_http_protocol || serv->open_mqtt_protocol)
+    {
+        return SW_TRUE;
+    }
+    else
+    {
         return SW_FALSE;
     }
 }
@@ -552,7 +577,7 @@ int swTaskWorker_finish(swServer *serv, char *data, int data_len, int flags);
 #define swTaskWorker_large_unpack(task, __malloc, _buf, _length)   swPackage_task _pkg;\
 	memcpy(&_pkg, task->data, sizeof(_pkg));\
 	_length = _pkg.length;\
-    if (_length > SwooleG.serv->package_max_length) {\
+    if (_length > SwooleG.serv->protocol.package_max_length) {\
         swWarn("task package is too big.");\
     }\
     _buf = __malloc(_length + 1);\
@@ -631,7 +656,7 @@ static sw_inline uint32_t swServer_worker_schedule(swServer *serv, uint32_t sche
     //polling mode
     if (serv->dispatch_mode == SW_DISPATCH_ROUND)
     {
-        target_worker_id = (serv->worker_round_id++) % serv->worker_num;
+        target_worker_id = sw_atomic_fetch_add(&serv->worker_round_id, 1) % serv->worker_num;
     }
     //Using the FD touch access to hash
     else if (serv->dispatch_mode == SW_DISPATCH_FDMOD)
@@ -679,12 +704,9 @@ static sw_inline uint32_t swServer_worker_schedule(swServer *serv, uint32_t sche
     else
     {
         int i;
-        sw_atomic_t *round = &SwooleTG.worker_round_i;
-        for (i = 0; i < serv->worker_num; i++)
+        for (i = 0; i < serv->worker_num + 1; i++)
         {
-            sw_atomic_fetch_add(round, 1);
-            target_worker_id = (*round) % serv->worker_num;
-
+            target_worker_id = sw_atomic_fetch_add(&serv->worker_round_id, 1) % serv->worker_num;
             if (serv->workers[target_worker_id].status == SW_WORKER_IDLE)
             {
                 break;
@@ -701,14 +723,26 @@ void swServer_worker_onStop(swServer *serv);
 int swWorker_create(swWorker *worker);
 int swWorker_onTask(swFactory *factory, swEventData *task);
 
-static sw_inline swConnection *swWorker_get_connection(swServer *serv, int fd)
+static sw_inline swConnection *swWorker_get_connection(swServer *serv, int session_id)
 {
-#ifdef SW_REACTOR_USE_SESSION
-    int real_fd = swServer_get_fd(serv, fd);
+    int real_fd = swServer_get_fd(serv, session_id);
     swConnection *conn = swServer_connection_get(serv, real_fd);
-#else
+    return conn;
+}
+
+static sw_inline swConnection *swServer_connection_verify(swServer *serv, int session_id)
+{
+    swSession *session = swServer_get_session(serv, session_id);
+    int fd = session->fd;
     swConnection *conn = swServer_connection_get(serv, fd);
-#endif
+    if (!conn || conn->active == 0)
+    {
+        return NULL;
+    }
+    if (session->id != session_id || conn->session_id != session_id)
+    {
+        return NULL;
+    }
     return conn;
 }
 

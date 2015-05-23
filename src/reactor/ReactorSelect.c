@@ -176,7 +176,7 @@ int swReactorSelect_wait(swReactor *reactor, struct timeval *timeo)
         }
     }
 
-    while (SwooleG.running > 0)
+    while (reactor->running > 0)
     {
         FD_ZERO(&(object->rfds));
         FD_ZERO(&(object->wfds));
@@ -250,7 +250,7 @@ int swReactorSelect_wait(swReactor *reactor, struct timeval *timeo)
                     }
                 }
                 //write
-                if (SW_FD_ISSET(ev->fd, &(object->wfds)) && !event.socket->removed)
+                if (SW_FD_ISSET(ev->fd, &(object->wfds)) && event.socket->fd && !event.socket->removed)
                 {
                     handle = swReactor_getHandle(reactor, SW_EVENT_WRITE, event.type);
                     ret = handle(reactor, &event);
@@ -261,7 +261,7 @@ int swReactorSelect_wait(swReactor *reactor, struct timeval *timeo)
                     }
                 }
                 //error
-                if (SW_FD_ISSET(ev->fd, &(object->efds)) && !event.socket->removed)
+                if (SW_FD_ISSET(ev->fd, &(object->efds)) && event.socket->fd && !event.socket->removed)
                 {
                     handle = swReactor_getHandle(reactor, SW_EVENT_ERROR, event.type);
                     ret = handle(reactor, &event);

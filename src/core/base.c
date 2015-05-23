@@ -44,8 +44,22 @@ void swoole_init(void)
     //random seed
     srandom(time(NULL));
 
+    //init global shared memory
+    SwooleG.memory_pool = swMemoryGlobal_new(SW_GLOBAL_MEMORY_PAGESIZE, 1);
+    if (SwooleG.memory_pool == NULL)
+    {
+        printf("[Master] Fatal Error: create global memory failed.");
+        exit(1);
+    }
+    SwooleGS = SwooleG.memory_pool->alloc(SwooleG.memory_pool, sizeof(swServerGS));
+    if (SwooleGS == NULL)
+    {
+        printf("[Master] Fatal Error: alloc memory for SwooleGS failed.");
+        exit(2);
+    }
+
     //init global lock
-    swMutex_create(&SwooleG.lock, 0);
+    swMutex_create(&SwooleGS->lock, 1);
 
     if (getrlimit(RLIMIT_NOFILE, &rlmt) < 0)
     {
@@ -68,17 +82,7 @@ void swoole_init(void)
 #endif
 
     SwooleG.use_timer_pipe = 1;
-    //初始化全局内存
-    SwooleG.memory_pool = swMemoryGlobal_new(SW_GLOBAL_MEMORY_PAGESIZE, 1);
-    if (SwooleG.memory_pool == NULL)
-    {
-        swError("[Master] Fatal Error: create global memory failed.");
-    }
-    SwooleGS = SwooleG.memory_pool->alloc(SwooleG.memory_pool, sizeof(swServerGS));
-    if (SwooleGS == NULL)
-    {
-        swError("[Master] Fatal Error: alloc memory for SwooleGS failed.");
-    }
+
     SwooleStats = SwooleG.memory_pool->alloc(SwooleG.memory_pool, sizeof(swServerStats));
     if (SwooleStats == NULL)
     {
@@ -358,6 +362,34 @@ void swoole_rtrim(char *str, int len)
     }
 }
 
+int swoole_tmpfile(char *filename)
+{
+#ifdef HAVE_MKOSTEMP
+    int tmp_fd = mkostemp(filename, O_WRONLY);
+#else
+    int tmp_fd = mkstemp(filename);
+#endif
+
+    if (tmp_fd < 0)
+    {
+        swSysError("mkdtemp(%s) failed.", filename);
+        return SW_ERR;
+    }
+    else
+    {
+        return tmp_fd;
+    }
+}
+
+long swoole_file_get_size(FILE *fp)
+{
+    long pos = ftell(fp);
+    fseek(fp, 0L, SEEK_END);
+    long size = ftell(fp);
+    fseek(fp, pos, SEEK_SET); 
+    return size;
+}
+
 swString* swoole_file_get_contents(char *filename)
 {
     struct stat file_stat;
@@ -615,7 +647,7 @@ void swoole_fcntl_set_block(int sock, int nonblock)
 
     if (opts < 0)
     {
-        swSysError("fcntl(sock,GETFL) failed.");
+        swSysError("fcntl(%d, GETFL) failed.", sock);
     }
 
     if (nonblock)
@@ -635,7 +667,7 @@ void swoole_fcntl_set_block(int sock, int nonblock)
 
     if (ret < 0)
     {
-        swSysError("fcntl(sock,SETFL,opts) failed.");
+        swSysError("fcntl(%d, SETFL, opts) failed.", sock);
     }
 }
 
@@ -777,25 +809,6 @@ char *swoole_kmp_strnstr(char *haystack, char *needle, uint32_t length)
     char *match = swoole_kmp_search(haystack, length, needle, nlen, borders);
     free(borders);
     return match;
-}
-
-int swoole_strnpos(char *haystack, char *needle, uint32_t length)
-{
-    uint32_t needle_length = strlen(needle);
-    uint32_t i;
-
-    for (i = 0; i < length; i++)
-    {
-        if (i + needle_length > length)
-        {
-            return -1;
-        }
-        if (strncmp(&haystack[i], needle, needle_length) == 0)
-        {
-            return i;
-        }
-    }
-    return -1;
 }
 
 #ifndef HAVE_CLOCK_GETTIME

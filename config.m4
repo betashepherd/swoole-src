@@ -164,6 +164,7 @@ if test "$PHP_SWOOLE" != "no"; then
     AC_CHECK_LIB(pthread, pthread_rwlock_init, AC_DEFINE(HAVE_RWLOCK, 1, [have pthread_rwlock_init]))
     AC_CHECK_LIB(pthread, pthread_spin_lock, AC_DEFINE(HAVE_SPINLOCK, 1, [have pthread_spin_lock]))
 	AC_CHECK_LIB(pthread, pthread_mutex_timedlock, AC_DEFINE(HAVE_MUTEX_TIMEDLOCK, 1, [have pthread_mutex_timedlock]))
+    AC_CHECK_LIB(pthread, pthread_barrier_init, AC_DEFINE(HAVE_PTHREAD_BARRIER, 1, [have pthread_barrier_init]))
     AC_CHECK_LIB(ssl, SSL_library_init, AC_DEFINE(HAVE_OPENSSL, 1, [have openssl]))
     AC_CHECK_LIB(pcre, pcre_compile, AC_DEFINE(HAVE_PCRE, 1, [have pcre]))
     
@@ -250,6 +251,7 @@ if test "$PHP_SWOOLE" != "no"; then
         src/os/sendfile.c \
         src/os/signal.c \
         src/os/timer.c \
+        src/protocol/Base.c \
         src/protocol/SSL.c \
         src/protocol/Http.c \
         src/protocol/WebSocket.c \
@@ -258,6 +260,7 @@ if test "$PHP_SWOOLE" != "no"; then
         
     if test "$enable_swoole" != "yes"; then
         swoole_source_file="$swoole_source_file thirdparty/php_http_parser.c"
+        swoole_source_file="$swoole_source_file thirdparty/multipart_parser.c"
     fi
 
     PHP_NEW_EXTENSION(swoole, $swoole_source_file, $ext_shared)

@@ -44,11 +44,6 @@ void swWorker_free(swWorker *worker)
     {
         sw_shm_free(worker->send_shm);
     }
-
-    if (worker->lock.free)
-    {
-        worker->lock.free(&worker->lock);
-    }
 }
 
 void swWorker_signal_init(void)
@@ -69,7 +64,7 @@ void swWorker_signal_handler(int signo)
     switch (signo)
     {
     case SIGTERM:
-        SwooleG.running = 0;
+        SwooleG.main_reactor->running = 0;
         break;
     case SIGALRM:
         swTimer_signal_handler(SIGALRM);
@@ -88,18 +83,47 @@ void swWorker_signal_handler(int signo)
     }
 }
 
-#ifdef SW_REACTOR_USE_SESSION
-static sw_inline int swWorker_get_session_id(swServer *serv, int fd)
+static sw_inline int swWorker_discard_data(swServer *serv, swEventData *task)
 {
-    swConnection *conn = swServer_connection_get(serv, fd);
-    //socket is closed, discard package.
-    if (!conn || conn->closed || conn->session_id == 0)
+    int fd = task->info.fd;
+    //check connection
+    swConnection *conn = swServer_connection_verify(serv, task->info.fd);
+    if (conn == NULL)
     {
-        return SW_ERR;
+        if (serv->disable_notify && !serv->discard_timeout_request)
+        {
+            return SW_FALSE;
+        }
+        goto discard_data;
     }
-    return conn->session_id;
-}
+    else
+    {
+        if (conn->closed)
+        {
+            goto discard_data;
+        }
+        else
+        {
+            return SW_FALSE;
+        }
+    }
+    discard_data:
+#ifdef SW_USE_RINGBUFFER
+    if (task->info.type == SW_EVENT_PACKAGE)
+    {
+        swPackage package;
+        memcpy(&package, task->data, sizeof(package));
+        swReactorThread *thread = swServer_get_thread(SwooleG.serv, task->info.from_id);
+        thread->buffer_input->free(thread->buffer_input, package.data);
+        swWarn("[1]received the wrong data[%d bytes] from socket#%d", package.length, fd);
+    }
+    else
 #endif
+    {
+        swWarn("[1]received the wrong data[%d bytes] from socket#%d", task->info.len, fd);
+    }
+    return SW_TRUE;
+}
 
 int swWorker_onTask(swFactory *factory, swEventData *task)
 {
@@ -110,54 +134,41 @@ int swWorker_onTask(swFactory *factory, swEventData *task)
     //worker busy
     serv->workers[SwooleWG.id].status = SW_WORKER_BUSY;
 
-    int fd = task->info.fd;
-
     switch (task->info.type)
     {
+    //no buffer
     case SW_EVENT_TCP:
     //ringbuffer shm package
     case SW_EVENT_PACKAGE:
+        //discard data
+        if (swWorker_discard_data(serv, task) == SW_TRUE)
+        {
+            break;
+        }
         do_task:
-#ifdef SW_REACTOR_USE_SESSION
-        task->info.fd = swWorker_get_session_id(serv, fd);
-        if (task->info.fd < 0)
-        {
-#ifdef SW_USE_RINGBUFFER
-            if (task->info.type == SW_EVENT_PACKAGE)
-            {
-                swPackage package;
-                memcpy(&package, task->data, sizeof(package));
-                swReactorThread *thread = swServer_get_thread(SwooleG.serv, task->info.from_id);
-                thread->buffer_input->free(thread->buffer_input, package.data);
-                swWarn("[1]received the wrong data[%d bytes] from socket#%d", package.length, fd);
-            }
-            else
-#endif
-            {
-                swWarn("[1]received the wrong data[%d bytes] from socket#%d", task->info.len, fd);
-            }
-            return SW_OK;
-        }
-#endif
         factory->onTask(factory, task);
-        if (!SwooleWG.run_always)
-        {
-            //only onTask increase the count
-            SwooleWG.request_num--;
-        }
+        SwooleWG.request_count++;
+        sw_atomic_fetch_add(&SwooleStats->request_count, 1);
         if (task->info.type == SW_EVENT_PACKAGE_END)
         {
             package->length = 0;
         }
         break;
 
+    //chunk package
     case SW_EVENT_PACKAGE_START:
     case SW_EVENT_PACKAGE_END:
+        //discard data
+        if (swWorker_discard_data(serv, task) == SW_TRUE)
+        {
+            break;
+        }
         //input buffer
         package = SwooleWG.buffer_input[task->info.from_id];
         //merge data to package buffer
         memcpy(package->str + package->length, task->data, task->info.len);
         package->length += task->info.len;
+
         //package end
         if (task->info.type == SW_EVENT_PACKAGE_END)
         {
@@ -168,34 +179,16 @@ int swWorker_onTask(swFactory *factory, swEventData *task)
     case SW_EVENT_UDP:
     case SW_EVENT_UDP6:
     case SW_EVENT_UNIX_DGRAM:
+        SwooleWG.request_count++;
+        sw_atomic_fetch_add(&SwooleStats->request_count, 1);
         factory->onTask(factory, task);
-        if (!SwooleWG.run_always)
-        {
-            SwooleWG.request_num--;
-        }
         break;
 
     case SW_EVENT_CLOSE:
-#ifdef SW_REACTOR_USE_SESSION
-        task->info.fd = swWorker_get_session_id(serv, fd);
-        if (task->info.fd < 0)
-        {
-            swWarn("[2]received the wrong data from socket#%d", fd);
-            return SW_OK;
-        }
-#endif
         factory->end(factory, task->info.fd);
         break;
 
     case SW_EVENT_CONNECT:
-#ifdef SW_REACTOR_USE_SESSION
-        task->info.fd = swWorker_get_session_id(serv, fd);
-        if (task->info.fd < 0)
-        {
-            swWarn("[3]received the wrong data from socket#%d", fd);
-            return SW_OK;
-        }
-#endif
         serv->onConnect(serv, task->info.fd, task->info.from_id);
         break;
 
@@ -215,8 +208,8 @@ int swWorker_onTask(swFactory *factory, swEventData *task)
     //worker idle
     serv->workers[SwooleWG.id].status = SW_WORKER_IDLE;
 
-    //stop
-    if (SwooleWG.request_num < 0)
+    //maximum number of requests, process will exit.
+    if (!SwooleWG.run_always && SwooleWG.request_count > SwooleWG.max_request)
     {
         SwooleG.running = 0;
     }
@@ -358,6 +351,7 @@ int swWorker_loop(swFactory *factory, int worker_id)
 
     //worker_id
     SwooleWG.id = worker_id;
+    SwooleWG.request_count = 0;
     SwooleG.pid = getpid();
 
     //signal init
@@ -377,6 +371,8 @@ int swWorker_loop(swFactory *factory, int worker_id)
         swError("[Worker] create worker_reactor failed.");
         return SW_ERR;
     }
+    
+    serv->workers[worker_id].status = SW_WORKER_IDLE;
 
     int pipe_worker = serv->workers[worker_id].pipe_worker;
 
@@ -414,7 +410,7 @@ int swWorker_send2reactor(swEventData *ev_data, size_t sendn, int fd)
     /**
      * reactor_id: The fd in which the reactor.
      */
-    int reactor_id = fd % serv->reactor_num;
+    int reactor_id = ev_data->info.from_id;
     int pipe_index = fd % serv->reactor_pipe_num;
 
     /**

@@ -17,7 +17,7 @@
 #include "swoole.h"
 #include "Server.h"
 
-static int swProcessPool_worker_start(swProcessPool *pool, swWorker *worker);
+static int swProcessPool_worker_loop(swProcessPool *pool, swWorker *worker);
 static void swProcessPool_free(swProcessPool *pool);
 
 /**
@@ -87,7 +87,7 @@ int swProcessPool_create(swProcessPool *pool, int worker_num, int max_request, k
             pool->workers[i].pipe_object = pipe;
         }
     }
-    pool->main_loop = swProcessPool_worker_start;
+    pool->main_loop = swProcessPool_worker_loop;
     return SW_OK;
 }
 
@@ -111,19 +111,20 @@ int swProcessPool_start(swProcessPool *pool)
     return SW_OK;
 }
 
-static int swProcessPool_schedule(swProcessPool *pool)
+static sw_inline int swProcessPool_schedule(swProcessPool *pool)
 {
-    swWorker *worker;
-    int i, target_worker_id = pool->round_id;
+    if (pool->dispatch_mode == SW_DISPATCH_QUEUE)
+    {
+        return 0;
+    }
+
+    int i, target_worker_id = 0;
     int run_worker_num = pool->run_worker_num;
 
-    for (i = 0; i < run_worker_num; i++)
+    for (i = 0; i < run_worker_num + 1; i++)
     {
-        pool->round_id++;
-        target_worker_id = pool->round_id % run_worker_num;
-
-        worker = &pool->workers[i];
-        if (worker->status == SW_WORKER_IDLE)
+        target_worker_id = sw_atomic_fetch_add(&pool->round_id, 1) % run_worker_num;
+        if (pool->workers[target_worker_id].status == SW_WORKER_IDLE)
         {
             break;
         }
@@ -259,7 +260,7 @@ pid_t swProcessPool_spawn(swWorker *worker)
     return pid;
 }
 
-static int swProcessPool_worker_start(swProcessPool *pool, swWorker *worker)
+static int swProcessPool_worker_loop(swProcessPool *pool, swWorker *worker)
 {
     struct
     {
@@ -285,13 +286,13 @@ static int swProcessPool_worker_start(swProcessPool *pool, swWorker *worker)
      */
     out.buf.info.from_fd = worker->id;
 
-    if (SwooleG.task_dispatch_mode)
+    if (pool->dispatch_mode == SW_DISPATCH_QUEUE)
     {
-        out.mtype = worker->id + 1;
+        out.mtype = 0;
     }
     else
     {
-        out.mtype = 0;
+        out.mtype = worker->id + 1;
     }
 
     while (SwooleG.running > 0 && task_n > 0)
@@ -322,8 +323,11 @@ static int swProcessPool_worker_start(swProcessPool *pool, swWorker *worker)
             continue;
         }
 
+        SwooleWG.worker->status = SW_WORKER_BUSY;
         ret = pool->onTask(pool, &out.buf);
-        if (ret > 0 && !worker_task_always)
+        SwooleWG.worker->status = SW_WORKER_IDLE;
+
+        if (ret >= 0 && !worker_task_always)
         {
             task_n--;
         }
@@ -345,6 +349,7 @@ int swProcessPool_wait(swProcessPool *pool)
     int pid, new_pid;
     int reload_worker_i = 0;
     int ret;
+    int status;
 
     swWorker *reload_workers;
     reload_workers = sw_calloc(pool->worker_num, sizeof(swWorker));
@@ -356,7 +361,7 @@ int swProcessPool_wait(swProcessPool *pool)
 
     while (SwooleG.running)
     {
-        pid = wait(NULL);
+        pid = wait(&status);
         if (pid < 0)
         {
             if (pool->reloading == 0)
@@ -383,6 +388,10 @@ int swProcessPool_wait(swProcessPool *pool)
             {
                 swWarn("[Manager]unknow worker[pid=%d]", pid);
                 continue;
+            }
+            if (!WIFEXITED(status))
+            {
+                swWarn("worker#%d abnormal exit, status=%d, signal=%d", exit_worker->id, WEXITSTATUS(status),  WTERMSIG(status));
             }
             new_pid = swProcessPool_spawn(exit_worker);
             if (new_pid < 0)

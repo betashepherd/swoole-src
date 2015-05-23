@@ -115,7 +115,12 @@ int php_swoole_get_send_data(zval *zdata, char **str TSRMLS_DC)
             swoole_php_fatal_error(E_WARNING, "object is not instanceof swoole_buffer.");
             return SW_ERR;
         }
-        swString *str_buffer = php_swoole_buffer_get(zdata TSRMLS_CC);
+        swString *str_buffer = swoole_get_object(zdata);
+        if (!str_buffer->str)
+        {
+            swoole_php_fatal_error(E_WARNING, "swoole_buffer object is empty.");
+            return SW_ERR;
+        }
         length = str_buffer->length - str_buffer->offset;
         *str = str_buffer->str + str_buffer->offset;
     }
@@ -268,10 +273,10 @@ static int php_swoole_task_finish(swServer *serv, zval **data TSRMLS_DC)
     {
         //serialize
     	flags |= SW_TASK_SERIALIZE;
-        //TODO php serialize
         PHP_VAR_SERIALIZE_INIT(var_hash);
         php_var_serialize(&serialized_data, data, &var_hash TSRMLS_CC);
         PHP_VAR_SERIALIZE_DESTROY(var_hash);
+        //string and length
         data_str = serialized_data.c;
         data_len = serialized_data.len;
     }
@@ -658,6 +663,11 @@ static void php_swoole_onManagerStart(swServer *serv)
     zval **args[1];
     zval *retval;
 
+    pid_t manager_pid = serv->factory_mode == SW_MODE_PROCESS ? SwooleGS->manager_pid : 0;
+
+    zend_update_property_long(swoole_server_class_entry_ptr, zserv, ZEND_STRL("master_pid"), SwooleGS->master_pid TSRMLS_CC);
+    zend_update_property_long(swoole_server_class_entry_ptr, zserv, ZEND_STRL("manager_pid"), manager_pid TSRMLS_CC);
+
     args[0] = &zserv;
     zval_add_ref(&zserv);
 
@@ -781,6 +791,18 @@ static void php_swoole_onWorkerStart(swServer *serv, int worker_id)
     zend_update_property(swoole_server_class_entry_ptr, zserv, ZEND_STRL("worker_id"), zworker_id TSRMLS_CC);
 
     /**
+     * Is a task worker?
+     */
+    if (worker_id >= serv->worker_num)
+    {
+        zend_update_property_bool(swoole_server_class_entry_ptr, zserv, ZEND_STRL("taskworker"), 1 TSRMLS_CC);
+    }
+    else
+    {
+        zend_update_property_bool(swoole_server_class_entry_ptr, zserv, ZEND_STRL("taskworker"), 0 TSRMLS_CC);
+    }
+
+    /**
      * Worker Process ID
      */
     zend_update_property_long(swoole_server_class_entry_ptr, zserv, ZEND_STRL("worker_pid"), getpid() TSRMLS_CC);
@@ -794,7 +816,6 @@ static void php_swoole_onWorkerStart(swServer *serv, int worker_id)
     {
         return;
     }
-
     if (call_user_function_ex(EG(function_table), NULL, php_sw_callback[SW_SERVER_CB_onWorkerStart], &retval, 2, args,  0, NULL TSRMLS_CC) == FAILURE)
     {
         php_error_docref(NULL TSRMLS_CC, E_WARNING, "swoole_server: onWorkerStart handler error");
@@ -811,6 +832,12 @@ static void php_swoole_onWorkerStart(swServer *serv, int worker_id)
 
 static void php_swoole_onWorkerStop(swServer *serv, int worker_id)
 {
+    if (SwooleWG.shutdown)
+    {
+        return;
+    }
+    SwooleWG.shutdown = 1;
+
     zval *zobject = (zval *) serv->ptr2;
     zval *zworker_id;
     zval **args[2];  //这里必须与下面的数字对应
@@ -1045,11 +1072,14 @@ PHP_FUNCTION(swoole_server_create)
         server_object = return_value;
     }
 
-    zval *zres;
-    MAKE_STD_ZVAL(zres);
-    ZEND_REGISTER_RESOURCE(zres, serv, le_swoole_server);
-    zend_update_property(swoole_server_class_entry_ptr, server_object, ZEND_STRL("_server"), zres TSRMLS_CC);
-    zval_ptr_dtor(&zres);
+#ifdef HAVE_PCRE
+    zval *connection_iterator_object;
+    MAKE_STD_ZVAL(connection_iterator_object);
+    object_init_ex(connection_iterator_object, swoole_connection_iterator_class_entry_ptr);
+    zend_update_property(swoole_server_class_entry_ptr, server_object, ZEND_STRL("connections"), connection_iterator_object TSRMLS_CC);
+#endif
+
+    swoole_set_object(server_object, serv);
 }
 
 PHP_FUNCTION(swoole_server_set)
@@ -1057,7 +1087,7 @@ PHP_FUNCTION(swoole_server_set)
     zval *zset = NULL;
     zval *zobject = getThis();
     HashTable *vht;
-    swServer *serv;
+
     zval **v;
 
     if (SwooleGS->start > 0)
@@ -1080,7 +1110,7 @@ PHP_FUNCTION(swoole_server_set)
             return;
         }
     }
-    SWOOLE_GET_SERVER(zobject, serv);
+    swServer *serv = swoole_get_object(zobject);
 
     vht = Z_ARRVAL_P(zset);
 
@@ -1136,6 +1166,12 @@ PHP_FUNCTION(swoole_server_set)
             serv->worker_num = SwooleG.cpu_num;
         }
     }
+    //task_worker_max
+    if (sw_zend_hash_find(vht, ZEND_STRS("discard_timeout_request"), (void **)&v) == SUCCESS)
+    {
+        convert_to_long(*v);
+        serv->discard_timeout_request = Z_BVAL_PP(v);
+    }
     //task_worker_num
     if (sw_zend_hash_find(vht, ZEND_STRS("task_worker_num"), (void **)&v) == SUCCESS)
     {
@@ -1148,16 +1184,17 @@ PHP_FUNCTION(swoole_server_set)
 	    convert_to_long(*v);
 	    SwooleG.task_worker_max = (int)Z_LVAL_PP(v);
     }
-    
+    //task_max_request
+    if (sw_zend_hash_find(vht, ZEND_STRS("task_max_request"), (void **) &v) == SUCCESS)
+    {
+        convert_to_long(*v);
+        SwooleG.task_max_request = (int) Z_LVAL_PP(v);
+    }
+    //task_worker ipc mode, unix socket or message queue
     if (sw_zend_hash_find(vht, ZEND_STRS("task_ipc_mode"), (void **) &v) == SUCCESS)
     {
         convert_to_long(*v);
         SwooleG.task_ipc_mode = (int) Z_LVAL_PP(v);
-    }
-    if (sw_zend_hash_find(vht, ZEND_STRS("task_dispatch_mode"), (void **) &v) == SUCCESS)
-    {
-        convert_to_long(*v);
-        SwooleG.task_dispatch_mode = (int) Z_LVAL_PP(v);
     }
     /**
      * Temporary file directory for task_worker
@@ -1192,16 +1229,10 @@ PHP_FUNCTION(swoole_server_set)
         convert_to_long(*v);
         serv->max_request = (int) Z_LVAL_PP(v);
     }
-    //task_max_request
-    if (sw_zend_hash_find(vht, ZEND_STRS("task_max_request"), (void **) &v) == SUCCESS)
-    {
-        convert_to_long(*v);
-        serv->task_max_request = (int) Z_LVAL_PP(v);
-    }
     //cpu affinity
     if (sw_zend_hash_find(vht, ZEND_STRS("open_cpu_affinity"), (void **)&v) == SUCCESS)
     {
-        convert_to_long(*v);
+        convert_to_boolean(*v);
         serv->open_cpu_affinity = (uint8_t) Z_BVAL_PP(v);
     }
     //cpu affinity set
@@ -1239,8 +1270,8 @@ PHP_FUNCTION(swoole_server_set)
     //tcp_nodelay
     if (sw_zend_hash_find(vht, ZEND_STRS("open_tcp_nodelay"), (void **)&v) == SUCCESS)
     {
-        convert_to_long(*v);
-        serv->open_tcp_nodelay = (uint8_t) Z_LVAL_PP(v);
+        convert_to_boolean(*v);
+        serv->open_tcp_nodelay = (uint8_t) Z_BVAL_PP(v);
     }
     //tcp_defer_accept
     if (sw_zend_hash_find(vht, ZEND_STRS("tcp_defer_accept"), (void **)&v) == SUCCESS)
@@ -1251,27 +1282,34 @@ PHP_FUNCTION(swoole_server_set)
     //tcp_keepalive
     if (sw_zend_hash_find(vht, ZEND_STRS("open_tcp_keepalive"), (void **)&v) == SUCCESS)
     {
+        convert_to_boolean(*v);
         serv->open_tcp_keepalive = (uint8_t) Z_BVAL_PP(v);
     }
     //buffer: check eof
     if (sw_zend_hash_find(vht, ZEND_STRS("open_eof_check"), (void **)&v) == SUCCESS)
     {
-        convert_to_long(*v);
+        convert_to_boolean(*v);
         serv->open_eof_check = (uint8_t) Z_BVAL_PP(v);
+    }
+    //buffer: split package with eof
+    if (sw_zend_hash_find(vht, ZEND_STRS("open_eof_split"), (void **) &v) == SUCCESS)
+    {
+        convert_to_boolean(*v);
+        serv->open_eof_split = (uint8_t) Z_BVAL_PP(v);
     }
     //package eof
     if (sw_zend_hash_find(vht, ZEND_STRS("package_eof"), (void **) &v) == SUCCESS
             || sw_zend_hash_find(vht, ZEND_STRS("data_eof"), (void **) &v) == SUCCESS)
     {
         convert_to_string(*v);
-        serv->package_eof_len = Z_STRLEN_PP(v);
-        if (serv->package_eof_len > SW_DATA_EOF_MAXLEN)
+        serv->protocol.package_eof_len = Z_STRLEN_PP(v);
+        if (serv->protocol.package_eof_len > SW_DATA_EOF_MAXLEN)
         {
             php_error_docref(NULL TSRMLS_CC, E_ERROR, "pacakge_eof max length is %d", SW_DATA_EOF_MAXLEN);
             RETURN_FALSE;
         }
-        bzero(serv->package_eof, SW_DATA_EOF_MAXLEN);
-        memcpy(serv->package_eof, Z_STRVAL_PP(v), Z_STRLEN_PP(v));
+        bzero(serv->protocol.package_eof, SW_DATA_EOF_MAXLEN);
+        memcpy(serv->protocol.package_eof, Z_STRVAL_PP(v), Z_STRLEN_PP(v));
     }
     //buffer: http_protocol
     if (sw_zend_hash_find(vht, ZEND_STRS("open_http_protocol"), (void **) &v) == SUCCESS)
@@ -1403,10 +1441,10 @@ PHP_FUNCTION(swoole_server_set)
     if (sw_zend_hash_find(vht, ZEND_STRS("package_length_type"), (void **)&v) == SUCCESS)
     {
         convert_to_string(*v);
-        serv->package_length_type = Z_STRVAL_PP(v)[0];
-        serv->package_length_size = swoole_type_size(serv->package_length_type);
+        serv->protocol.package_length_type = Z_STRVAL_PP(v)[0];
+        serv->protocol.package_length_size = swoole_type_size(serv->protocol.package_length_type);
 
-        if (serv->package_length_size == 0)
+        if (serv->protocol.package_length_size == 0)
         {
             php_error_docref(NULL TSRMLS_CC, E_ERROR, "unknow package_length_type, see pack(). Link: http://php.net/pack");
             RETURN_FALSE;
@@ -1416,14 +1454,14 @@ PHP_FUNCTION(swoole_server_set)
     if (sw_zend_hash_find(vht, ZEND_STRS("package_length_offset"), (void **)&v) == SUCCESS)
     {
         convert_to_long(*v);
-        serv->package_length_offset = (int)Z_LVAL_PP(v);
+        serv->protocol.package_length_offset = (int)Z_LVAL_PP(v);
     }
     //package body start
     if (sw_zend_hash_find(vht, ZEND_STRS("package_body_offset"), (void **) &v) == SUCCESS
             || sw_zend_hash_find(vht, ZEND_STRS("package_body_start"), (void **) &v) == SUCCESS)
     {
         convert_to_long(*v);
-        serv->package_body_offset = (int) Z_LVAL_PP(v);
+        serv->protocol.package_body_offset = (int) Z_LVAL_PP(v);
     }
     /**
      * package max length
@@ -1431,7 +1469,7 @@ PHP_FUNCTION(swoole_server_set)
     if (sw_zend_hash_find(vht, ZEND_STRS("package_max_length"), (void **) &v) == SUCCESS)
     {
         convert_to_long(*v);
-        serv->package_max_length = (int) Z_LVAL_PP(v);
+        serv->protocol.package_max_length = (int) Z_LVAL_PP(v);
     }
 
     /**
@@ -1439,11 +1477,11 @@ PHP_FUNCTION(swoole_server_set)
      */
     if (serv->packet_mode == 1)
     {
-        serv->package_max_length = 64 * 1024 * 1024;
+        serv->protocol.package_max_length = 64 * 1024 * 1024;
         serv->open_length_check = 1;
-        serv->package_length_offset = 0;
-        serv->package_body_offset = 4;
-        serv->package_length_type = 'N';
+        serv->protocol.package_length_offset = 0;
+        serv->protocol.package_body_offset = 4;
+        serv->protocol.package_length_type = 'N';
         serv->open_eof_check = 0;
     }
 
@@ -1462,6 +1500,14 @@ PHP_FUNCTION(swoole_server_set)
     {
         convert_to_long(*v);
         serv->buffer_output_size = (int) Z_LVAL_PP(v);
+    }
+    /**
+     * set pipe memory buffer size
+     */
+    if (sw_zend_hash_find(vht, ZEND_STRS("pipe_buffer_size"), (void **) &v) == SUCCESS)
+    {
+        convert_to_long(*v);
+        serv->pipe_buffer_size = (int) Z_LVAL_PP(v);
     }
     //message queue key
     if (sw_zend_hash_find(vht, ZEND_STRS("message_queue_key"), (void **) &v) == SUCCESS)
@@ -1509,7 +1555,7 @@ PHP_FUNCTION(swoole_server_handler)
     char *ha_name = NULL;
     int len, i;
     int ret = -1;
-    swServer *serv;
+
     zval *cb;
 
     if (SwooleGS->start > 0)
@@ -1532,9 +1578,7 @@ PHP_FUNCTION(swoole_server_handler)
             return;
         }
     }
-    SWOOLE_GET_SERVER(zobject, serv);
 
-    //必须与define顺序一致
     char *callback[PHP_SERVER_CALLBACK_NUM] = {
         "onStart",
         "onConnect",
@@ -1553,6 +1597,7 @@ PHP_FUNCTION(swoole_server_handler)
         "onManagerStop",
         "onPipeMessage",
     };
+
     for (i = 0; i < PHP_SERVER_CALLBACK_NUM; i++)
     {
         if (strncasecmp(callback[i], ha_name, len) == 0)
@@ -1574,7 +1619,7 @@ PHP_FUNCTION(swoole_server_on)
     char *ha_name = NULL;
     int len, i;
     int ret = -1;
-    swServer *serv;
+
     zval *cb;
 
     if (SwooleGS->start > 0)
@@ -1597,9 +1642,7 @@ PHP_FUNCTION(swoole_server_on)
             return;
         }
     }
-    SWOOLE_GET_SERVER(zobject, serv);
 
-    //必须与define顺序一致
     char *callback[PHP_SERVER_CALLBACK_NUM] = {
         "start",
         "connect",
@@ -1637,7 +1680,7 @@ PHP_FUNCTION(swoole_server_on)
 PHP_FUNCTION(swoole_server_addlisten)
 {
     zval *zobject = getThis();
-    swServer *serv = NULL;
+
     char *host;
     int host_len;
     long sock_type;
@@ -1663,7 +1706,7 @@ PHP_FUNCTION(swoole_server_addlisten)
             return;
         }
     }
-    SWOOLE_GET_SERVER(zobject, serv);
+    swServer *serv = swoole_get_object(zobject);
     SW_CHECK_RETURN(swServer_add_listener(serv, (int)sock_type, host, (int)port));
 }
 
@@ -1676,14 +1719,14 @@ PHP_METHOD(swoole_server, addprocess)
     }
 
     zval *process = NULL;
-    swServer *serv = NULL;
+
 
     if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "z", &process) == FAILURE)
     {
         return;
     }
 
-    SWOOLE_GET_SERVER(getThis(), serv);
+    swServer *serv = swoole_get_object(getThis());
 
     if (!instanceof_function(Z_OBJCE_P(process), swoole_process_class_entry_ptr TSRMLS_CC))
     {
@@ -1698,9 +1741,7 @@ PHP_METHOD(swoole_server, addprocess)
 
     zval_add_ref(&process);
 
-    swWorker *worker = NULL;
-    SWOOLE_GET_WORKER(process, worker);
-
+    swWorker *worker = swoole_get_object(process);
     worker->ptr = process;
 
     int id = swServer_add_worker(serv, worker);
@@ -1717,7 +1758,7 @@ PHP_METHOD(swoole_server, addprocess)
 PHP_FUNCTION(swoole_server_start)
 {
     zval *zobject = getThis();
-    swServer *serv;
+
     int ret;
 
     if (SwooleGS->start > 0)
@@ -1734,7 +1775,7 @@ PHP_FUNCTION(swoole_server_start)
         }
     }
 
-    SWOOLE_GET_SERVER(zobject, serv);
+    swServer *serv = swoole_get_object(zobject);
     php_swoole_register_callback(serv);
 
     if (php_sw_callback[SW_SERVER_CB_onReceive] == NULL)
@@ -1758,6 +1799,35 @@ PHP_FUNCTION(swoole_server_start)
      */
     zend_update_property_long(swoole_server_class_entry_ptr, zobject, ZEND_STRL("master_pid"), getpid() TSRMLS_CC);
 
+    zval *zsetting = zend_read_property(swoole_server_class_entry_ptr, zobject, ZEND_STRL("setting"), 1 TSRMLS_CC);
+    if (zsetting == NULL || ZVAL_IS_NULL(zsetting))
+    {
+        MAKE_STD_ZVAL(zsetting);
+        array_init(zsetting);
+        zend_update_property(swoole_server_class_entry_ptr, zobject, ZEND_STRL("setting"), zsetting TSRMLS_CC);
+    }
+
+    if (!zend_hash_exists(Z_ARRVAL_P(zsetting), ZEND_STRL("worker_num")))
+    {
+        add_assoc_long(zsetting, "worker_num", serv->worker_num);
+    }
+    if (!zend_hash_exists(Z_ARRVAL_P(zsetting), ZEND_STRL("task_worker_num")))
+    {
+        add_assoc_long(zsetting, "task_worker_num", SwooleG.task_worker_num);
+    }
+    if (!zend_hash_exists(Z_ARRVAL_P(zsetting), ZEND_STRL("pipe_buffer_size")))
+    {
+        add_assoc_long(zsetting, "pipe_buffer_size", serv->pipe_buffer_size);
+    }
+    if (!zend_hash_exists(Z_ARRVAL_P(zsetting), ZEND_STRL("buffer_output_size")))
+    {
+        add_assoc_long(zsetting, "buffer_output_size", serv->buffer_output_size);
+    }
+    if (!zend_hash_exists(Z_ARRVAL_P(zsetting), ZEND_STRL("max_connection")))
+    {
+        add_assoc_long(zsetting, "max_connection", serv->max_connection);
+    }
+
     ret = swServer_start(serv);
     if (ret < 0)
     {
@@ -1770,7 +1840,7 @@ PHP_FUNCTION(swoole_server_start)
 PHP_FUNCTION(swoole_server_send)
 {
     zval *zobject = getThis();
-    swServer *serv = NULL;
+
     int ret;
 
     zval *zfd;
@@ -1811,7 +1881,7 @@ PHP_FUNCTION(swoole_server_send)
         RETURN_FALSE;
     }
 
-    SWOOLE_GET_SERVER(zobject, serv);
+   swServer *serv = swoole_get_object(zobject);
 
     if (serv->have_udp_sock && Z_TYPE_P(zfd) == IS_STRING)
     {
@@ -1857,7 +1927,7 @@ PHP_FUNCTION(swoole_server_send)
 
         struct sockaddr_in addr_in;
         addr_in.sin_family = AF_INET;
-        addr_in.sin_port = htons((uint16_t) (uint16_t) (udp_info.port));
+        addr_in.sin_port = htons(udp_info.port);
         addr_in.sin_addr.s_addr = fd;
         ret = swSocket_sendto_blocking(udp_info.from_fd, data, length, 0, (struct sockaddr *) &addr_in, sizeof(addr_in));
         SW_CHECK_RETURN(ret);
@@ -1882,7 +1952,7 @@ PHP_FUNCTION(swoole_server_send)
 PHP_METHOD(swoole_server, sendto)
 {
     zval *zobject = getThis();
-    swServer *serv = NULL;
+
 
     char *data;
     int len;
@@ -1909,7 +1979,7 @@ PHP_METHOD(swoole_server, sendto)
         RETURN_FALSE;
     }
 
-    SWOOLE_GET_SERVER(zobject, serv);
+   swServer *serv = swoole_get_object(zobject);
 
     if (ipv6 == 0 && serv->udp_socket_ipv4 <= 0)
     {
@@ -1937,7 +2007,7 @@ PHP_METHOD(swoole_server, sendto)
 PHP_FUNCTION(swoole_server_sendfile)
 {
     zval *zobject = getThis();
-    swServer *serv;
+
     swSendData send_data;
 
     char buffer[SW_BUFFER_SIZE];
@@ -1990,13 +2060,14 @@ PHP_FUNCTION(swoole_server_sendfile)
         RETURN_FALSE;
     }
 
-    SWOOLE_GET_SERVER(zobject, serv);
+    swServer *serv = swoole_get_object(zobject);
 
     send_data.info.fd = (int) conn_fd;
     send_data.info.type = SW_EVENT_SENDFILE;
     memcpy(buffer, filename, send_data.info.len);
     buffer[send_data.info.len] = 0;
     send_data.info.len++;
+    send_data.length = 0;
 
     send_data.data = buffer;
     SW_CHECK_RETURN(serv->factory.finish(&serv->factory, &send_data));
@@ -2005,7 +2076,7 @@ PHP_FUNCTION(swoole_server_sendfile)
 PHP_FUNCTION(swoole_server_close)
 {
     zval *zobject = getThis();
-    swServer *serv;
+
     zval *zfd;
 
     if (SwooleGS->start == 0)
@@ -2035,7 +2106,7 @@ PHP_FUNCTION(swoole_server_close)
         }
     }
     convert_to_long(zfd);
-    SWOOLE_GET_SERVER(zobject, serv);
+    swServer *serv = swoole_get_object(zobject);
     SW_CHECK_RETURN(serv->factory.end(&serv->factory, Z_LVAL_P(zfd)));
 }
 
@@ -2053,13 +2124,15 @@ PHP_METHOD(swoole_server, stats)
     add_assoc_long_ex(return_value, SW_STRL("accept_count"), SwooleStats->accept_count);
     add_assoc_long_ex(return_value, SW_STRL("close_count"), SwooleStats->close_count);
     add_assoc_long_ex(return_value, SW_STRL("tasking_num"), SwooleStats->tasking_num);
+    add_assoc_long_ex(return_value, SW_STRL("request_count"), SwooleStats->request_count);
+    add_assoc_long_ex(return_value, SW_STRL("worker_request_count"), SwooleWG.request_count);
     add_assoc_long_ex(return_value, SW_STRL("task_process_num"), SwooleGS->task_workers.run_worker_num);
 }
 
 PHP_FUNCTION(swoole_server_reload)
 {
     zval *zobject = getThis();
-    swServer *serv;
+
     zend_bool only_reload_taskworker = 0;
 
     if (SwooleGS->start == 0)
@@ -2083,7 +2156,6 @@ PHP_FUNCTION(swoole_server_reload)
             return;
         }
     }
-    SWOOLE_GET_SERVER(zobject, serv);
 
     int sig = only_reload_taskworker ? SIGUSR2 : SIGUSR1;
     if (kill(SwooleGS->manager_pid, sig) < 0)
@@ -2097,7 +2169,7 @@ PHP_FUNCTION(swoole_server_reload)
 PHP_FUNCTION(swoole_server_heartbeat)
 {
     zval *zobject = getThis();
-    swServer *serv;
+
     zend_bool close_connection = 0;
 
     if (SwooleGS->start == 0)
@@ -2120,7 +2192,7 @@ PHP_FUNCTION(swoole_server_heartbeat)
             return;
         }
     }
-    SWOOLE_GET_SERVER(zobject, serv);
+    swServer *serv = swoole_get_object(zobject);
 
     if (serv->heartbeat_idle_time < 1)
     {
@@ -2163,7 +2235,7 @@ PHP_FUNCTION(swoole_server_heartbeat)
 PHP_FUNCTION(swoole_server_gettimer)
 {
     zval *zobject = getThis();
-    swServer *serv = NULL;
+
     long interval;
 
     if (SwooleGS->start == 0)
@@ -2179,7 +2251,6 @@ PHP_FUNCTION(swoole_server_gettimer)
             return;
         }
     }
-    SWOOLE_GET_SERVER(zobject, serv);
 
     if (SwooleG.timer.list == NULL)
     {
@@ -2209,7 +2280,7 @@ PHP_FUNCTION(swoole_server_gettimer)
 PHP_FUNCTION(swoole_server_addtimer)
 {
     zval *zobject = getThis();
-    swServer *serv = NULL;
+
     long interval;
 
     if (swIsMaster())
@@ -2251,7 +2322,6 @@ PHP_FUNCTION(swoole_server_addtimer)
         }
     }
 
-    SWOOLE_GET_SERVER(zobject, serv);
     php_swoole_check_timer(interval);
     SW_CHECK_RETURN(SwooleG.timer.add(&SwooleG.timer, (int )interval, 1, NULL));
 }
@@ -2260,7 +2330,7 @@ PHP_FUNCTION(swoole_server_taskwait)
 {
     zval *zobject = getThis();
     swEventData buf;
-    swServer *serv;
+
 
     zval **data;
     smart_str serialized_data = {0};
@@ -2296,7 +2366,7 @@ PHP_FUNCTION(swoole_server_taskwait)
         }
     }
 
-    SWOOLE_GET_SERVER(zobject, serv);
+    swServer *serv = swoole_get_object(zobject);
 
     if (SwooleG.task_worker_num < 1)
     {
@@ -2394,7 +2464,7 @@ PHP_FUNCTION(swoole_server_task)
 {
     zval *zobject = getThis();
     swEventData buf;
-    swServer *serv;
+
     zval **data;
 	smart_str serialized_data = {0};
 	php_serialize_data_t var_hash;
@@ -2422,7 +2492,7 @@ PHP_FUNCTION(swoole_server_task)
         }
     }
 
-    SWOOLE_GET_SERVER(zobject, serv);
+    swServer *serv = swoole_get_object(zobject);
 
     if (SwooleG.task_worker_num < 1)
     {
@@ -2506,7 +2576,7 @@ PHP_METHOD(swoole_server, sendmessage)
 {
     zval *zobject = getThis();
     swEventData buf;
-    swServer *serv;
+
 
     char *msg;
     int msglen;
@@ -2529,7 +2599,7 @@ PHP_METHOD(swoole_server, sendmessage)
         RETURN_FALSE;
     }
 
-    SWOOLE_GET_SERVER(zobject, serv);
+    swServer *serv = swoole_get_object(zobject);
     if (worker_id >= serv->worker_num + SwooleG.task_worker_num)
     {
         php_error_docref(NULL TSRMLS_CC, E_WARNING, "worker_id[%d] is invalid.", (int) worker_id);
@@ -2568,7 +2638,7 @@ PHP_METHOD(swoole_server, sendmessage)
 PHP_FUNCTION(swoole_server_finish)
 {
     zval *zobject = getThis();
-    swServer *serv = NULL;
+
 
     zval **data;
 
@@ -2592,15 +2662,14 @@ PHP_FUNCTION(swoole_server_finish)
             return;
         }
     }
-
-    SWOOLE_GET_SERVER(zobject, serv);
+    swServer *serv = swoole_get_object(zobject);
     SW_CHECK_RETURN(php_swoole_task_finish(serv, data TSRMLS_CC));
 }
 
 PHP_METHOD(swoole_server, bind)
 {
     zval *zobject = getThis();
-    swServer *serv;
+
     long fd = 0;
     long uid = 0;
 
@@ -2615,9 +2684,9 @@ PHP_METHOD(swoole_server, bind)
         return;
     }
 
-    SWOOLE_GET_SERVER(zobject, serv);
+    swServer *serv = swoole_get_object(zobject);
 
-    swConnection *conn = swServer_connection_get(serv, fd);
+    swConnection *conn = swWorker_get_connection(serv, fd);
 
     //udp client
     if (conn == NULL)
@@ -2639,20 +2708,20 @@ PHP_METHOD(swoole_server, bind)
     }
 
     int ret = 0;
-    SwooleG.lock.lock(&SwooleG.lock);
+    SwooleGS->lock.lock(&SwooleGS->lock);
     if (conn->uid == 0)
     {
         conn->uid = uid;
         ret = 1;
     }
-    SwooleG.lock.unlock(&SwooleG.lock);
+    SwooleGS->lock.unlock(&SwooleGS->lock);
     SW_CHECK_RETURN(ret);
 }
 
 PHP_FUNCTION(swoole_connection_info)
 {
     zval *zobject = getThis();
-    swServer *serv;
+
     zend_bool noCheckConnection = 0;
     zval *zfd;
     long from_id = -1;
@@ -2677,7 +2746,7 @@ PHP_FUNCTION(swoole_connection_info)
             return;
         }
     }
-    SWOOLE_GET_SERVER(zobject, serv);
+    swServer *serv = swoole_get_object(zobject);
 
     long fd;
     zend_bool ipv6_udp = 0;
@@ -2772,7 +2841,7 @@ PHP_FUNCTION(swoole_connection_info)
 PHP_FUNCTION(swoole_connection_list)
 {
     zval *zobject = getThis();
-    swServer *serv;
+
     long start_fd = 0;
     long find_count = 10;
 
@@ -2796,7 +2865,7 @@ PHP_FUNCTION(swoole_connection_list)
             return;
         }
     }
-    SWOOLE_GET_SERVER(zobject, serv);
+    swServer *serv = swoole_get_object(zobject);
 
     //超过最大查找数量
     if (find_count > SW_MAX_FIND_COUNT)
@@ -2856,11 +2925,61 @@ PHP_FUNCTION(swoole_connection_list)
     }
 }
 
+PHP_METHOD(swoole_server, sendwait)
+{
+    zval *zobject = getThis();
+
+    long fd;
+    zval *zdata;
+
+    if (SwooleGS->start == 0)
+    {
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "Server is not running.");
+        RETURN_FALSE;
+    }
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "lz", &fd, &zdata) == FAILURE)
+    {
+        return;
+    }
+
+    char *data;
+    int length = php_swoole_get_send_data(zdata, &data TSRMLS_CC);
+
+    if (length < 0)
+    {
+        RETURN_FALSE;
+    }
+    else if (length == 0)
+    {
+        php_error_docref(NULL TSRMLS_CC, E_WARNING, "data is empty.");
+        RETURN_FALSE;
+    }
+
+    swServer *serv = swoole_get_object(zobject);
+
+    if (serv->factory_mode != SW_MODE_SINGLE || swIsTaskWorker())
+    {
+        swoole_php_fatal_error(E_WARNING, "cannot sendwait.");
+        RETURN_FALSE;
+    }
+
+    //UDP
+    if (swServer_is_udp(fd))
+    {
+        swoole_php_fatal_error(E_WARNING, "cannot sendwait.");
+        RETURN_FALSE;
+    }
+    //TCP
+    else
+    {
+        SW_CHECK_RETURN(swServer_tcp_sendwait(serv, fd, data, length));
+    }
+}
 
 PHP_FUNCTION(swoole_server_shutdown)
 {
     zval *zobject = getThis();
-    swServer *serv;
 
     if (SwooleGS->start == 0)
     {
@@ -2875,7 +2994,6 @@ PHP_FUNCTION(swoole_server_shutdown)
             return;
         }
     }
-    SWOOLE_GET_SERVER(zobject, serv);
     if (kill(SwooleGS->master_pid, SIGTERM) < 0)
     {
         php_error_docref(NULL TSRMLS_CC, E_WARNING, "shutdown failed. kill -SIGTERM master_pid[%d] fail. Error: %s[%d]", SwooleGS->master_pid, strerror(errno), errno);
@@ -2886,6 +3004,65 @@ PHP_FUNCTION(swoole_server_shutdown)
         RETURN_TRUE;
     }
 }
+
+#ifdef HAVE_PCRE
+static struct
+{
+    int current_fd;
+    int max_fd;
+    uint32_t session_id;
+    int end;
+    int index;
+} server_itearator;
+
+PHP_METHOD(swoole_connection_iterator, rewind)
+{
+    bzero(&server_itearator, sizeof(server_itearator));
+    server_itearator.current_fd = swServer_get_minfd(SwooleG.serv);
+}
+
+PHP_METHOD(swoole_connection_iterator, valid)
+{
+    int fd = server_itearator.current_fd;
+    swConnection *conn;
+
+    int max_fd = swServer_get_maxfd(SwooleG.serv);
+    for (; fd <= max_fd; fd++)
+    {
+        conn = &SwooleG.serv->connection_list[fd];
+
+        if (conn->active && !conn->closed)
+        {
+            server_itearator.session_id = conn->session_id;
+            server_itearator.current_fd = fd;
+            server_itearator.index++;
+            RETURN_TRUE;
+        }
+    }
+
+    RETURN_FALSE;
+}
+
+PHP_METHOD(swoole_connection_iterator, current)
+{
+    RETURN_LONG(server_itearator.session_id);
+}
+
+PHP_METHOD(swoole_connection_iterator, next)
+{
+    server_itearator.current_fd ++;
+}
+
+PHP_METHOD(swoole_connection_iterator, key)
+{
+    RETURN_LONG(server_itearator.index);
+}
+
+PHP_METHOD(swoole_connection_iterator, count)
+{
+    RETURN_LONG(SwooleStats->connection_num);
+}
+#endif
 
 /*
  * Local variables:

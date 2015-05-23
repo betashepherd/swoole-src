@@ -49,6 +49,8 @@ int swReactor_create(swReactor *reactor, int max_event)
 #endif
     }
 
+    reactor->running = 1;
+
     reactor->setHandle = swReactor_setHandle;
     reactor->onFinish = swReactor_onFinish;
     reactor->onTimeout = swReactor_onTimeout;
@@ -143,7 +145,7 @@ int swReactor_add(swReactor *reactor, int fd, int fdtype)
     socket->events = swReactor_events(fdtype);
     socket->removed = 0;
 
-    swTraceLog(SW_TRACE_REACTOR, "fd=%d, type=%d, events=%d", fd, socket->type, socket->events);
+    swTraceLog(SW_TRACE_REACTOR, "fd=%d, type=%d, events=%d", fd, socket->socket_type, socket->events);
 
     return SW_OK;
 }
@@ -208,15 +210,16 @@ static void swReactor_onFinish(swReactor *reactor)
 int swReactor_close(swReactor *reactor, int fd)
 {
     swConnection *socket = swReactor_get(reactor, fd);
-
-    if (socket->out_buffer != NULL)
+    if (socket->out_buffer)
     {
         swBuffer_free(socket->out_buffer);
+        socket->out_buffer = NULL;
     }
 
-    if (socket->in_buffer != NULL)
+    if (socket->in_buffer)
     {
         swBuffer_free(socket->in_buffer);
+        socket->in_buffer = NULL;
     }
 
 #ifdef SW_USE_OPENSSL
@@ -227,7 +230,6 @@ int swReactor_close(swReactor *reactor, int fd)
 #endif
 
     bzero(socket, sizeof(swConnection));
-
     return close(fd);
 }
 
@@ -236,7 +238,9 @@ int swReactor_write(swReactor *reactor, int fd, void *buf, int n)
     int ret;
     swConnection *socket = swReactor_get(reactor, fd);
     swBuffer *buffer = socket->out_buffer;
-    
+
+    assert(fd > 2);
+
     if (socket->fd == 0)
     {
         socket->fd = fd;
@@ -244,12 +248,21 @@ int swReactor_write(swReactor *reactor, int fd, void *buf, int n)
 
     if (swBuffer_empty(buffer))
     {
-        do_receive:
+        do_send:
         ret = swConnection_send(socket, buf, n, 0);
 
         if (ret > 0)
         {
-            return ret;
+            if (n == ret)
+            {
+                return ret;
+            }
+            else
+            {
+                buf += ret;
+                n -= ret;
+                goto do_buffer;
+            }
         }
 #ifdef HAVE_KQUEUE
         else if (errno == EAGAIN || errno == ENOBUFS)
@@ -257,6 +270,7 @@ int swReactor_write(swReactor *reactor, int fd, void *buf, int n)
         else if (errno == EAGAIN)
 #endif
         {
+            do_buffer:
             if (!socket->out_buffer)
             {
                 buffer = swBuffer_new(sizeof(swEventData));
@@ -284,11 +298,12 @@ int swReactor_write(swReactor *reactor, int fd, void *buf, int n)
                     swSysError("reactor->add(%d, SW_EVENT_WRITE) failed.", fd);
                 }
             }
-            goto append_pipe_buffer;
+
+            goto append_buffer;
         }
         else if (errno == EINTR)
         {
-            goto do_receive;
+            goto do_send;
         }
         else
         {
@@ -297,7 +312,7 @@ int swReactor_write(swReactor *reactor, int fd, void *buf, int n)
     }
     else
     {
-        append_pipe_buffer:
+        append_buffer:
 
         if (buffer->length > SwooleG.socket_buffer_size)
         {

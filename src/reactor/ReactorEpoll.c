@@ -132,6 +132,11 @@ static int swReactorEpoll_add(swReactor *reactor, int fd, int fdtype)
     fd_.fdtype = swReactor_fdtype(fdtype);
     e.events = swReactorEpoll_event_set(fdtype);
 
+    if (e.events & EPOLLOUT)
+    {
+        assert(fd > 2);
+    }
+
     memcpy(&(e.data.u64), &fd_, sizeof(fd_));
     ret = epoll_ctl(object->epfd, EPOLL_CTL_ADD, fd, &e);
     if (ret < 0)
@@ -180,6 +185,11 @@ static int swReactorEpoll_set(swReactor *reactor, int fd, int fdtype)
     bzero(&e, sizeof(struct epoll_event));
     e.events = swReactorEpoll_event_set(fdtype);
 
+    if (e.events & EPOLLOUT)
+    {
+        assert(fd > 2);
+    }
+
     fd_.fd = fd;
     fd_.fdtype = swReactor_fdtype(fdtype);
     memcpy(&(e.data.u64), &fd_, sizeof(fd_));
@@ -219,7 +229,7 @@ static int swReactorEpoll_wait(swReactor *reactor, struct timeval *timeo)
         }
     }
 
-    while (SwooleG.running > 0)
+    while (reactor->running > 0)
     {
         msec = reactor->timeout_msec;
         n = epoll_wait(epoll_fd, events, max_event_num, msec);
@@ -253,27 +263,26 @@ static int swReactorEpoll_wait(swReactor *reactor, struct timeval *timeo)
             //read
             if (events[i].events & EPOLLIN)
             {
-                //read
                 handle = swReactor_getHandle(reactor, SW_EVENT_READ, event.type);
                 ret = handle(reactor, &event);
                 if (ret < 0)
                 {
-                    swWarn("[Reactor#%d] epoll [EPOLLIN] handle failed. fd=%d. Error: %s[%d]", reactor_id, event.fd, strerror(errno), errno);
+                    swSysError("EPOLLIN handle failed. fd=%d.", event.fd);
                 }
             }
             //write
-            if ((events[i].events & EPOLLOUT) && !event.socket->removed)
+            if ((events[i].events & EPOLLOUT) && event.socket->fd && !event.socket->removed)
             {
                 handle = swReactor_getHandle(reactor, SW_EVENT_WRITE, event.type);
                 ret = handle(reactor, &event);
                 if (ret < 0)
                 {
-                    swWarn("[Reactor#%d] epoll [EPOLLOUT] handle failed. fd=%d. Error: %s[%d]", reactor_id, event.fd, strerror(errno), errno);
+                    swSysError("EPOLLOUT handle failed. fd=%d.", event.fd);
                 }
             }
             //error
 #ifndef NO_EPOLLRDHUP
-            if ((events[i].events & (EPOLLRDHUP | EPOLLERR | EPOLLHUP)) && !event.socket->removed)
+            if ((events[i].events & (EPOLLRDHUP | EPOLLERR | EPOLLHUP)) && event.socket->fd && !event.socket->removed)
 #else
             if ((events[i].events & (EPOLLERR | EPOLLHUP)) && !event.socket->removed)
 #endif
@@ -282,7 +291,7 @@ static int swReactorEpoll_wait(swReactor *reactor, struct timeval *timeo)
                 ret = handle(reactor, &event);
                 if (ret < 0)
                 {
-                    swWarn("[Reactor#%d] epoll [EPOLLERR] handle failed. fd=%d. Error: %s[%d]", reactor_id, event.fd, strerror(errno), errno);
+                    swSysError("EPOLLERR handle failed. fd=%d.", event.fd);
                 }
             }
         }
