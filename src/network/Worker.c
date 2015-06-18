@@ -64,7 +64,14 @@ void swWorker_signal_handler(int signo)
     switch (signo)
     {
     case SIGTERM:
-        SwooleG.main_reactor->running = 0;
+        if (SwooleG.main_reactor)
+        {
+            SwooleG.main_reactor->running = 0;
+        }
+        else
+        {
+            SwooleG.running = 0;
+        }
         break;
     case SIGALRM:
         swTimer_signal_handler(SIGALRM);
@@ -145,8 +152,7 @@ int swWorker_onTask(swFactory *factory, swEventData *task)
         {
             break;
         }
-        do_task:
-        factory->onTask(factory, task);
+        do_task: serv->onReceive(serv, task);
         SwooleWG.request_count++;
         sw_atomic_fetch_add(&SwooleStats->request_count, 1);
         if (task->info.type == SW_EVENT_PACKAGE_END)
@@ -181,7 +187,7 @@ int swWorker_onTask(swFactory *factory, swEventData *task)
     case SW_EVENT_UNIX_DGRAM:
         SwooleWG.request_count++;
         sw_atomic_fetch_add(&SwooleStats->request_count, 1);
-        factory->onTask(factory, task);
+        serv->onPacket(serv, task);
         break;
 
     case SW_EVENT_CLOSE:

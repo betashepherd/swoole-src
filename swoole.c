@@ -505,7 +505,6 @@ PHP_MINIT_FUNCTION(swoole)
     zend_class_implements(swoole_connection_iterator_class_entry_ptr TSRMLS_CC, 2, spl_ce_Iterator, spl_ce_Countable);
 #endif
 
-
     //swoole init
     swoole_init();
 
@@ -614,6 +613,9 @@ PHP_MINFO_FUNCTION(swoole)
 #endif
 #ifdef HAVE_MUTEX_TIMEDLOCK
     php_info_print_table_row(2, "mutex_timedlock", "enabled");
+#endif
+#ifdef HAVE_PTHREAD_BARRIER
+    php_info_print_table_row(2, "pthread_barrier", "enabled");
 #endif
 
     php_info_print_table_end();

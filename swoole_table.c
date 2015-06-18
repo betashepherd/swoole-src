@@ -71,6 +71,7 @@ static PHP_METHOD(swoole_table, create);
 static PHP_METHOD(swoole_table, set);
 static PHP_METHOD(swoole_table, get);
 static PHP_METHOD(swoole_table, del);
+static PHP_METHOD(swoole_table, exist);
 static PHP_METHOD(swoole_table, incr);
 static PHP_METHOD(swoole_table, decr);
 static PHP_METHOD(swoole_table, lock);
@@ -95,6 +96,7 @@ static const zend_function_entry swoole_table_methods[] =
     PHP_ME(swoole_table, get,         arginfo_swoole_table_get, ZEND_ACC_PUBLIC)
     PHP_ME(swoole_table, count,       arginfo_swoole_table_void, ZEND_ACC_PUBLIC)
     PHP_ME(swoole_table, del,         arginfo_swoole_table_del, ZEND_ACC_PUBLIC)
+    PHP_ME(swoole_table, exist,       arginfo_swoole_table_get, ZEND_ACC_PUBLIC)
     PHP_ME(swoole_table, incr,        arginfo_swoole_table_incr, ZEND_ACC_PUBLIC)
     PHP_ME(swoole_table, decr,        arginfo_swoole_table_decr, ZEND_ACC_PUBLIC)
     PHP_ME(swoole_table, lock,        arginfo_swoole_table_void, ZEND_ACC_PUBLIC)
@@ -130,7 +132,7 @@ static void php_swoole_table_row2array(swTable *table, swTableRow *row, zval *re
         if (col->type == SW_TABLE_STRING)
         {
             memcpy(&vlen, row->data + col->index, sizeof(swTable_string_length_t));
-            add_assoc_stringl_ex(return_value, col->name->str, col->name->length + 1, row->data + col->index + sizeof(swTable_string_length_t), vlen, 1);
+            sw_add_assoc_stringl_ex(return_value, col->name->str, col->name->length + 1, row->data + col->index + sizeof(swTable_string_length_t), vlen, 1);
         }
         else if (col->type == SW_TABLE_FLOAT)
         {
@@ -213,7 +215,6 @@ PHP_METHOD(swoole_table, __destruct)
     }
 }
 
-
 PHP_METHOD(swoole_table, column)
 {
     char *name;
@@ -261,21 +262,17 @@ static PHP_METHOD(swoole_table, set)
         RETURN_FALSE;
     }
 
-    swTableColumn *col;
+       swTableColumn *col;
     zval *v;
     char *k;
-    int klen;
-    Bucket *p = Z_ARRVAL_P(array)->pListHead;
+    uint klen;
+    ulong knum;
 
     sw_atomic_t *lock = &row->lock;
     sw_spinlock(lock);
-    do
-    {
-        v = p->pDataPtr;
-        k = (char *) p->arKey;
-        klen = p->nKeyLength - 1;
-        p = p->pListNext;
 
+    WRAPPER_ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(array), v)
+        wrapper_zend_hash_get_current_key(Z_ARRVAL_P(array),&k,&klen,&knum);
         col = swTableColumn_get(table, k, klen);
         if (col == NULL)
         {
@@ -283,23 +280,24 @@ static PHP_METHOD(swoole_table, set)
         }
         else if (col->type == SW_TABLE_STRING)
         {
-            convert_to_string(v);
-            swTableRow_set_value(row, col, Z_STRVAL_P(v), Z_STRLEN_P(v));
-        }
-        else if (col->type == SW_TABLE_FLOAT)
-        {
-            convert_to_double(v);
-            swTableRow_set_value(row, col, &Z_DVAL_P(v), 0);
-        }
-        else
-        {
-            convert_to_long(v);
-            swTableRow_set_value(row, col, &Z_LVAL_P(v), 0);
-        }
-    } while (p);
-    sw_spinlock_release(lock);
-
-    RETURN_TRUE;
+            convert_to_string(v);                                                                                                                     
+            swTableRow_set_value(row, col, Z_STRVAL_P(v), Z_STRLEN_P(v));                                                                             
+        }                                                                                                                                             
+        else if (col->type == SW_TABLE_FLOAT)                                                                                                         
+        {                                                                                                                                             
+            convert_to_double(v);                                                                                                                     
+            swTableRow_set_value(row, col, &Z_DVAL_P(v), 0);                                                                                          
+        }                                                                                                                                             
+        else                                                                                                                                          
+        {                                                                                                                                             
+            convert_to_long(v);                                                                                                                       
+            swTableRow_set_value(row, col, &Z_LVAL_P(v), 0);                                                                                          
+        }                                                                                                                                             
+     WRAPPER_ZEND_HASH_FOREACH_END();                                                                                                                 
+                                                                                                                                                      
+    sw_spinlock_release(lock);                                                                                                                        
+                                                                                                                                                      
+    RETURN_TRUE;     
 }
 
 static PHP_METHOD(swoole_table, incr)
@@ -460,6 +458,27 @@ static PHP_METHOD(swoole_table, get)
         RETURN_FALSE;
     }
     php_swoole_table_row2array(table, row, return_value);
+}
+
+static PHP_METHOD(swoole_table, exist)
+{
+    char *key;
+    int keylen;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &key, &keylen) == FAILURE)
+    {
+        RETURN_FALSE;
+    }
+    swTable *table = swoole_get_object(getThis());
+    swTableRow *row = swTableRow_get(table, key, keylen);
+    if (!row)
+    {
+        RETURN_FALSE;
+    }
+    else
+    {
+        RETURN_TRUE;
+    }
 }
 
 static PHP_METHOD(swoole_table, del)

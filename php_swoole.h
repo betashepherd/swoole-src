@@ -27,7 +27,8 @@
 #include "zend_interfaces.h"
 #include "zend_exceptions.h"
 #include "zend_variables.h"
-
+#include <ext/date/php_date.h>
+#include <ext/standard/url.h>
 #include <ext/standard/info.h>
 
 #ifdef HAVE_CONFIG_H
@@ -39,7 +40,7 @@
 #include "Client.h"
 #include "async.h"
 
-#define PHP_SWOOLE_VERSION  "1.7.17-beta"
+#define PHP_SWOOLE_VERSION  "1.7.18-alpha"
 #define PHP_SWOOLE_CHECK_CALLBACK
 
 /**
@@ -118,49 +119,7 @@ extern swoole_object_array swoole_objects;
 #endif
 #endif
 
-#if PHP_MAJOR_VERSION < 7
-typedef zend_rsrc_list_entry zend_resource;
-#define SW_RETURN_STRING                     RETURN_STRING
-#define sw_add_assoc_string                  add_assoc_string
-#define sw_zend_hash_find                    zend_hash_find
-#define sw_zend_hash_index_find              zend_hash_index_find
-#define SW_ZVAL_STRINGL                      ZVAL_STRINGL
-#else
-#define SW_RETURN_STRING(val, duplicate)     RETURN_STRING(val)
-#define sw_add_assoc_string(array, key, value, duplicate)   add_assoc_string(array, key, value)
-#define SW_ZVAL_STRINGL(z, s, l, dup)         ZVAL_STRINGL(z, s, l)
-
-static inline int sw_zend_hash_find(HashTable *ht, char *k, int len, void **v)
-{
-    char _key[128];
-    zend_string *key;
-
-    if (sizeof(zend_string) + len > sizeof(_key))
-    {
-        key = emalloc(sizeof(zend_string) + len);
-    }
-    else
-    {
-       key = _key;
-    }
-
-    key->len = len;
-    memcpy(key->val, k, len);
-    key->val[len] = 0;
-
-    zval *value = zend_hash_find(ht, key);
-
-    if (value == NULL)
-    {
-        return FAILURE;
-    }
-    else
-    {
-        *v = value;
-        return SUCCESS;
-    }
-}
-#endif
+#include "php7_wrapper.h"
 
 #define PHP_CLIENT_CALLBACK_NUM             4
 //---------------------------------------------------
@@ -172,7 +131,7 @@ static inline int sw_zend_hash_find(HashTable *ht, char *k, int len, void **v)
 #define SW_MAX_FIND_COUNT                   100    //for swoole_server::connection_list
 #define SW_PHP_CLIENT_BUFFER_SIZE           65535
 
-#define PHP_SERVER_CALLBACK_NUM             16
+#define PHP_SERVER_CALLBACK_NUM             17
 //--------------------------------------------------------
 #define SW_SERVER_CB_onStart                0 //Server start(master)
 #define SW_SERVER_CB_onConnect              1 //accept new connection(worker)
@@ -190,6 +149,7 @@ static inline int sw_zend_hash_find(HashTable *ht, char *k, int len, void **v)
 #define SW_SERVER_CB_onManagerStart         13
 #define SW_SERVER_CB_onManagerStop          14
 #define SW_SERVER_CB_onPipeMessage          15
+#define SW_SERVER_CB_onPacket               16 //udp packet
 //---------------------------------------------------------
 #define SW_FLAG_KEEP                        (1u << 9)
 #define SW_FLAG_ASYNC                       (1u << 10)
@@ -197,26 +157,36 @@ static inline int sw_zend_hash_find(HashTable *ht, char *k, int len, void **v)
 //---------------------------------------------------------
 #define php_swoole_socktype(type)           (type & (~SW_FLAG_SYNC) & (~SW_FLAG_ASYNC) & (~SW_FLAG_KEEP))
 #define php_swoole_array_length(array)      (Z_ARRVAL_P(array)->nNumOfElements)
-
 static sw_inline void* swoole_get_object(zval *object)
 {
-    zend_object_handle handle = Z_OBJ_HANDLE_P(object);
+#if PHP_MAJOR_VERSION < 7
+zend_object_handle handle = Z_OBJ_HANDLE_P(object);
+#else
+int handle = (int)Z_OBJ_HANDLE(*object);
+#endif
+    
     assert(handle < swoole_objects.size);
     return  swoole_objects.array[handle];
 }
 
 static sw_inline void swoole_set_object(zval *object, void *ptr)
 {
+#if PHP_MAJOR_VERSION < 7
     zend_object_handle handle = Z_OBJ_HANDLE_P(object);
+#else
+    int handle = (int) Z_OBJ_HANDLE(*object);
+#endif
     if (handle >= swoole_objects.size)
     {
-        swoole_objects.size = swoole_objects.size * 2;
+        uint32_t old_size = swoole_objects.size;
+        swoole_objects.size = old_size * 2;
         if (swoole_objects.size > SW_MAX_SOCKET_ID)
         {
             swoole_objects.size = SW_MAX_SOCKET_ID;
         }
         assert(handle < SW_MAX_SOCKET_ID);
         swoole_objects.array = erealloc(swoole_objects.array, swoole_objects.size);
+        bzero(swoole_objects.array + (old_size * sizeof(void*)), (swoole_objects.size - old_size) * sizeof(void**));
     }
     swoole_objects.array[handle] = ptr;
 }
@@ -334,7 +304,7 @@ void php_swoole_check_timer(int interval);
 void php_swoole_register_callback(swServer *serv);
 long php_swoole_add_timer(int ms, zval *callback, zval *param, int is_tick TSRMLS_DC);
 
-zval *php_swoole_get_recv_data(swEventData *req TSRMLS_DC);
+zval *php_swoole_get_recv_data(zval *,swEventData *req TSRMLS_DC);
 int php_swoole_get_send_data(zval *zdata, char **str TSRMLS_DC);
 void php_swoole_onClose(swServer *, int fd, int from_id);
 

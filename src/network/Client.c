@@ -184,7 +184,7 @@ static int swClient_inet_addr(swClient *cli, char *host, int port)
         }
         if (!(host_entry = gethostbyname(host)))
         {
-            swWarn("SwooleClient: Host lookup failed. Error: %s[%d] ", strerror(errno), errno);
+            swWarn("gethostbyname('%s') failed.", host);
             return SW_ERR;
         }
         if (host_entry->h_addrtype != AF_INET)
@@ -277,7 +277,14 @@ static int swClient_tcp_connect(swClient *cli, char *host, int port, double time
 
 static int swClient_tcp_send_async(swClient *cli, char *data, int length)
 {
-    return SwooleG.main_reactor->write(SwooleG.main_reactor, cli->socket->fd, data, length);
+    if (SwooleG.main_reactor->write(SwooleG.main_reactor, cli->socket->fd, data, length) < 0)
+    {
+        return SW_ERR;
+    }
+    else
+    {
+        return length;
+    }
 }
 
 static int swClient_tcp_send_sync(swClient *cli, char *data, int length)
