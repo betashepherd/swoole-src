@@ -215,9 +215,10 @@ int swWorker_onTask(swFactory *factory, swEventData *task)
     serv->workers[SwooleWG.id].status = SW_WORKER_IDLE;
 
     //maximum number of requests, process will exit.
-    if (!SwooleWG.run_always && SwooleWG.request_count > SwooleWG.max_request)
+    if (!SwooleWG.run_always && SwooleWG.request_count >= SwooleWG.max_request)
     {
         SwooleG.running = 0;
+        SwooleG.main_reactor->running = 0;
     }
     return SW_OK;
 }
@@ -250,7 +251,7 @@ void swWorker_onStart(swServer *serv)
             group = getgrnam(SwooleG.group);
             if (!group)
             {
-                swSysError("get group [%s] info failed.", SwooleG.group);
+                swWarn("get group [%s] info failed.", SwooleG.group);
             }
         }
         //get user info
@@ -259,7 +260,7 @@ void swWorker_onStart(swServer *serv)
             passwd = getpwnam(SwooleG.user);
             if (!passwd)
             {
-                swSysError("get user [%s] info failed.", SwooleG.user);
+                swWarn("get user [%s] info failed.", SwooleG.user);
             }
         }
         //chroot

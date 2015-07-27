@@ -706,11 +706,9 @@ static int swReactorThread_onWrite(swReactor *reactor, swEvent *ev)
 
 static int swReactorThread_onReceive_buffer_check_eof(swReactor *reactor, swEvent *event)
 {
-    int recv_again = SW_FALSE;
-    int buf_size;
-
     swServer *serv = SwooleG.serv;
     swConnection *conn = swServer_connection_get(serv, event->fd);
+    swProtocol *protocol = &serv->protocol;
 
     if (conn->object == NULL)
     {
@@ -721,99 +719,13 @@ static int swReactorThread_onReceive_buffer_check_eof(swReactor *reactor, swEven
             return SW_ERR;
         }
     }
-    swString *buffer = conn->object;
-    swProtocol *protocol = &serv->protocol;
 
-    recv_data:
-    buf_size = buffer->size - buffer->length;
-    char *buf_ptr = buffer->str + buffer->length;
-
-    if (buf_size > SW_BUFFER_SIZE)
+    if (swProtocol_recv_check_eof(protocol, conn, conn->object) < 0)
     {
-        buf_size = SW_BUFFER_SIZE;
-    }
-
-    int n = swConnection_recv(conn, buf_ptr, buf_size, 0);
-    //swNotice("ReactorThread: recv[len=%d]", n);
-    if (n < 0)
-    {
-        switch (swConnection_error(errno))
-        {
-        case SW_ERROR:
-            swSysError("recv from connection#%d failed.", event->fd);
-            return SW_OK;
-        case SW_CLOSE:
-            goto close_fd;
-        default:
-            return SW_OK;
-        }
-    }
-    else if (n == 0)
-    {
-        close_fd:
+        swTrace("Close Event.FD=%d|From=%d", event->fd, event->from_id);
         swReactorThread_onClose(reactor, event);
-        return SW_OK;
     }
-    else
-    {
-        //update time
-        conn->last_time = SwooleGS->now;
-        buffer->length += n;
 
-        if (buffer->length < protocol->package_eof_len)
-        {
-            return SW_OK;
-        }
-
-        if (serv->open_eof_split)
-        {
-            if (swProtocol_split_package_by_eof(protocol, conn, buffer) == 0)
-            {
-                return SW_OK;
-            }
-            else
-            {
-                recv_again = SW_TRUE;
-            }
-        }
-        else if (memcmp(buffer->str + buffer->length - protocol->package_eof_len, protocol->package_eof, protocol->package_eof_len) == 0)
-        {
-            swReactorThread_send_string_buffer(conn, buffer->str, buffer->length);
-            swString_clear(buffer);
-            return SW_OK;
-        }
-
-        //over max length, will discard
-        if (buffer->length == protocol->package_max_length)
-        {
-            swWarn("Package is too big. package_length=%d", (int )buffer->length);
-            goto close_fd;
-        }
-
-        //buffer is full, may have not read data
-        if (buffer->length == buffer->size)
-        {
-            recv_again = SW_TRUE;
-            if (buffer->size < protocol->package_max_length)
-            {
-                uint32_t extend_size = swoole_size_align(buffer->size * 2, SwooleG.pagesize);
-                if (extend_size > protocol->package_max_length)
-                {
-                    extend_size = protocol->package_max_length;
-                }
-                if (swString_extend(buffer, extend_size) < 0)
-                {
-                    return SW_ERR;
-                }
-            }
-        }
-
-        //no eof
-        if (recv_again)
-        {
-            goto recv_data;
-        }
-    }
     return SW_OK;
 }
 
@@ -928,7 +840,8 @@ void swReactorThread_set_protocol(swServer *serv, swReactor *reactor)
     }
     else if (serv->open_length_check)
     {
-        serv->get_package_length = swProtocol_get_package_length;
+        serv->protocol.get_package_length = swProtocol_get_package_length;
+        serv->protocol.onPackage = swReactorThread_send_string_buffer;
         reactor->setHandle(reactor, SW_FD_TCP, swReactorThread_onReceive_buffer_check_length);
     }
     else if (serv->open_http_protocol)
@@ -937,7 +850,7 @@ void swReactorThread_set_protocol(swServer *serv, swReactor *reactor)
     }
     else if (serv->open_mqtt_protocol)
     {
-        serv->get_package_length = swMqtt_get_package_length;
+        serv->protocol.get_package_length = swMqtt_get_package_length;
         reactor->setHandle(reactor, SW_FD_TCP, swReactorThread_onReceive_buffer_check_length);
     }
     else
@@ -948,150 +861,26 @@ void swReactorThread_set_protocol(swServer *serv, swReactor *reactor)
 
 static int swReactorThread_onReceive_buffer_check_length(swReactor *reactor, swEvent *event)
 {
-    int package_total_length;
     swServer *serv = reactor->ptr;
     swConnection *conn = swServer_connection_get(serv, event->fd);
     swProtocol *protocol = &serv->protocol;
 
-    char recv_buf[SW_BUFFER_SIZE_BIG];
-    char tmp_buf[SW_BUFFER_SIZE_BIG];
-
-    int n = swConnection_recv(conn, recv_buf, SW_BUFFER_SIZE_BIG, 0);
-    if (n < 0)
+    if (conn->object == NULL)
     {
-        switch (swConnection_error(errno))
+        conn->object = swString_new(SW_BUFFER_SIZE_BIG);
+        //alloc memory failed.
+        if (!conn->object)
         {
-        case SW_ERROR:
-            swSysError("recv from connection#%d failed.", event->fd);
-            return SW_OK;
-        case SW_CLOSE:
-            goto close_fd;
-        default:
-            return SW_OK;
+            return SW_ERR;
         }
     }
-    else if (n == 0)
+
+    if (swProtocol_recv_check_length(protocol, conn, conn->object) < 0)
     {
-        close_fd:
         swTrace("Close Event.FD=%d|From=%d", event->fd, event->from_id);
         swReactorThread_onClose(reactor, event);
-        return SW_OK;
     }
-    else
-    {
-        conn->last_time = SwooleGS->now;
 
-        swString *package;
-        char *tmp_ptr = recv_buf;
-        uint32_t tmp_n = n;
-
-        //new package
-        if (conn->object == NULL)
-        {
-            do_parse_package: do
-            {
-                package_total_length = serv->get_package_length(protocol, conn, tmp_ptr, (uint32_t) tmp_n);
-
-                //invalid package, close connection.
-                if (package_total_length < 0)
-                {
-                    goto close_fd;
-                }
-                //no enough data
-                else if (package_total_length == 0)
-                {
-                    //recv again
-                    n = swConnection_recv(conn, (void *) (recv_buf + tmp_n), SW_BUFFER_SIZE_BIG - tmp_n, 0);
-                    if (n > 0)
-                    {
-                        tmp_n += n;
-                        goto do_parse_package;
-                    }
-                    else if (n == 0)
-                    {
-                        goto close_fd;
-                    }
-                    else
-                    {
-                        swWarn("no enough data, close connection{%s:%d}.", swConnection_get_ip(conn), swConnection_get_port(conn));
-                        goto close_fd;
-                    }
-                }
-                //complete package
-                if (package_total_length <= tmp_n)
-                {
-                    //swoole_dump_bin(tmp_package.str, 's', tmp_package.length);
-                    swReactorThread_send_string_buffer(conn, tmp_ptr, package_total_length);
-
-                    tmp_n -= package_total_length;
-                    //reset recv_buf
-                    memcpy(tmp_buf, recv_buf + package_total_length, tmp_n);
-                    memcpy(recv_buf, tmp_buf, tmp_n);
-                    tmp_ptr = recv_buf;
-                    continue;
-                }
-                //wait more data
-                else
-                {
-                    package = swString_new(package_total_length);
-                    if (package == NULL)
-                    {
-                        return SW_ERR;
-                    }
-                    memcpy(package->str, (void *) tmp_ptr, (uint32_t) tmp_n);
-                    package->length += tmp_n;
-                    conn->object = (void *) package;
-                    break;
-                }
-            } while (tmp_n > 0);
-            return SW_OK;
-        }
-        //package wait data
-        else
-        {
-            package = conn->object;
-            //swTraceLog(40, "wait_data, size=%d, length=%d", buffer->size, buffer->length);
-
-            /**
-             * Also on the require_n byte data is complete.
-             */
-            int require_n = package->size - package->length;
-
-            /**
-             * Data is not complete, continue to wait
-             */
-            if (require_n > n)
-            {
-                memcpy(package->str + package->length, recv_buf, n);
-                package->length += n;
-                return SW_OK;
-            }
-            else
-            {
-                memcpy(package->str + package->length, recv_buf, require_n);
-                package->length += require_n;
-
-                //send buffer to worker pipe
-                swReactorThread_send_string_buffer(conn, package->str, package->length);
-
-                //free the buffer memory
-                swString_free((swString *) package);
-                conn->object = NULL;
-
-                //still have the data, to parse
-                if (n - require_n > 0)
-                {
-                    //reset tmp_n
-                    tmp_n = n - require_n;
-                    //reset recv_buf
-                    memcpy(tmp_buf, recv_buf + require_n, tmp_n);
-                    memcpy(recv_buf, tmp_buf, tmp_n);
-                    tmp_ptr = recv_buf;
-                    goto do_parse_package;
-                }
-            }
-        }
-    }
     return SW_OK;
 }
 
@@ -1663,11 +1452,15 @@ int swReactorThread_start(swServer *serv, swReactor *main_reactor_ptr)
     //listen TCP
     if (serv->have_tcp_sock == 1)
     {
-        //listen server socket
-        ret = swServer_listen(serv, main_reactor_ptr);
-        if (ret < 0)
+        swListenPort *ls;
+        LL_FOREACH(serv->listen_list, ls)
         {
-            return SW_ERR;
+            ret = swServer_listen(serv, ls);
+            if (ret < 0)
+            {
+                return SW_ERR;
+            }
+            main_reactor_ptr->add(main_reactor_ptr, ls->sock, SW_FD_LISTEN);
         }
 
 #ifdef HAVE_PTHREAD_BARRIER
@@ -1852,7 +1645,7 @@ static int swUDPThread_start(swServer *serv)
 {
     swThreadParam *param;
     pthread_t thread_id;
-    swListenList_node *ls;
+    swListenPort *ls;
 
     void * (*thread_loop)(void *);
 
@@ -1934,7 +1727,7 @@ static int swReactorThread_send_string_buffer(swConnection *conn, char *data, ui
     task.data.info.fd = conn->fd;
     task.data.info.from_id = conn->from_id;
 
-    swTrace("send string package, size=%ldbytes.", buffer->length);
+    swTrace("send string package, size=%ld bytes.", length);
 
 #ifdef SW_USE_RINGBUFFER
     swServer *serv = SwooleG.serv;
@@ -2185,7 +1978,7 @@ void swReactorThread_free(swServer *serv)
 
     if (serv->have_udp_sock == 1)
     {
-        swListenList_node *ls;
+        swListenPort *ls;
         LL_FOREACH(serv->listen_list, ls)
         {
             if (ls->type == SW_SOCK_UDP || ls->type == SW_SOCK_UDP6 || ls->type == SW_SOCK_UNIX_DGRAM)

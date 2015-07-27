@@ -30,7 +30,11 @@
 #define SW_DEBUG_SERVER_PORT       9999
 
 #define SW_SOCKET_OVERFLOW_WAIT    100
-#define SW_SOCKET_BUFFER_SIZE      (8*1024*1024)  //UDP socket的buffer区大小
+#if __MACH__
+#define SW_SOCKET_BUFFER_SIZE      (256*1024)
+#else
+#define SW_SOCKET_BUFFER_SIZE      (8*1024*1024)
+#endif
 
 #define SW_GLOBAL_MEMORY_PAGESIZE  (1024*1024*2) //全局内存的分页
 
@@ -204,10 +208,12 @@
 #define SW_HTTP_BAD_REQUEST              "<h1>400 Bad Request</h1>\r\n"
 #define SW_HTTP_PARAM_MAX_NUM            128
 #define SW_HTTP_COOKIE_KEYLEN            128
+#define SW_HTTP_COOKIE_VALLEN            2048
 #define SW_HTTP_RESPONSE_INIT_SIZE       65536
 #define SW_HTTP_HEADER_MAX_SIZE          8192
 #define SW_HTTP_COMPRESS_GZIP
 #define SW_HTTP_UPLOAD_TMP_FILE          "/tmp/swoole.upfile.XXXXXX"
+#define SW_HTTP_DATE_FORMAT              "D, d M Y H:i:s T"
 //#define SW_HTTP_100_CONTINUE
 
 #define SW_WEBSOCKET_SERVER_SOFTWARE     "swoole-websocket-server"

@@ -184,15 +184,15 @@ int swoole_websocket_onMessage(swEventData *req)
 
     int fd = req->info.fd;
     zval *zdata;
-    SW_MAKE_STD_ZVAL(zdata, 0);
+    SW_MAKE_STD_ZVAL(zdata);
     zdata = php_swoole_get_recv_data(zdata, req TSRMLS_CC);
 
     char *buf = Z_STRVAL_P(zdata);
     long finish = buf[0] ? 1 : 0;
     long opcode = buf[1] ? 1 : 0;
 
-	zval *zframe;
-    SW_MAKE_STD_ZVAL(zframe, 1);
+    zval *zframe;
+    SW_MAKE_STD_ZVAL(zframe);
     object_init_ex(zframe, swoole_websocket_frame_class_entry_ptr);
 
     zend_update_property_long(swoole_websocket_frame_class_entry_ptr, zframe, ZEND_STRL("fd"), fd TSRMLS_CC);
@@ -203,11 +203,11 @@ int swoole_websocket_onMessage(swEventData *req)
     swServer *serv = SwooleG.serv;
     zval *zserv = (zval *) serv->ptr2;
 
-	zval **args[2];
-	args[0] = &zserv;
-	args[1] = &zframe;
+    zval **args[2];
+    args[0] = &zserv;
+    args[1] = &zframe;
 
-	zval *retval = NULL;
+    zval *retval = NULL;
 
     if (sw_call_user_function_ex(EG(function_table), NULL, websocket_callbacks[WEBSOCKET_CALLBACK_onMessage], &retval, 2,
             args, 0, NULL TSRMLS_CC) == FAILURE)
@@ -243,9 +243,9 @@ int swoole_websocket_onHandshake(swoole_http_client *client)
     {
         swTrace("websocket handshake error\n");
         SwooleG.serv->factory.end(&SwooleG.serv->factory, fd);
-		return SW_ERR;
+        return SW_ERR;
     }
-	swoole_websocket_onOpen(client);
+    swoole_websocket_onOpen(client);
     if (!client->end)
     {
         swoole_http_request_free(client TSRMLS_CC);

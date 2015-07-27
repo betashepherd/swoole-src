@@ -21,8 +21,24 @@
 typedef zend_rsrc_list_entry zend_resource;
 #define SW_RETURN_STRING                      RETURN_STRING
 #define SW_Z_ARRVAL_P                         Z_ARRVAL_P
+#define IS_TRUE                               1
 #define sw_add_assoc_string                   add_assoc_string
-inline int sw_zend_hash_find(HashTable *ht, char *k, int len, void **v);
+
+static inline int sw_zend_hash_find(HashTable *ht, char *k, int len, void **v)
+{
+    zval **tmp = NULL;
+    if (zend_hash_find(ht, k, len, (void **) &tmp) == SUCCESS)
+    {
+        *v = *tmp;
+        return SUCCESS;
+    }
+    else
+    {
+        *v = NULL;
+        return FAILURE;
+    }
+}
+
 #define sw_zend_hash_del                      zend_hash_del
 #define sw_zend_hash_update                   zend_hash_update
 #define sw_zend_hash_index_find               zend_hash_index_find
@@ -30,9 +46,9 @@ inline int sw_zend_hash_find(HashTable *ht, char *k, int len, void **v);
 #define SW_ZEND_FETCH_RESOURCE_NO_RETURN      ZEND_FETCH_RESOURCE_NO_RETURN
 #define SW_ZEND_FETCH_RESOURCE                ZEND_FETCH_RESOURCE
 #define SW_ZEND_REGISTER_RESOURCE             ZEND_REGISTER_RESOURCE
-#define SW_MAKE_STD_ZVAL(p,o)                 MAKE_STD_ZVAL(p)
+#define SW_MAKE_STD_ZVAL(p)                   MAKE_STD_ZVAL(p)
 #define SW_ZVAL_STRING                        ZVAL_STRING
-#define SW_ALLOC_INIT_ZVAL(p,o)               ALLOC_INIT_ZVAL(p)
+#define SW_ALLOC_INIT_ZVAL(p)                 ALLOC_INIT_ZVAL(p)
 #define SW_RETVAL_STRINGL                     RETVAL_STRINGL
 #define sw_smart_str                          smart_str
 #define sw_php_var_unserialize                php_var_unserialize
@@ -46,53 +62,101 @@ inline int sw_zend_hash_find(HashTable *ht, char *k, int len, void **v);
 #define sw_zend_hash_copy                     zend_hash_copy
 #define sw_zval_add_ref                       zval_add_ref
 #define sw_zend_hash_exists                   zend_hash_exists
-#define sw_strndup(v,l)                       strndup(Z_STRVAL_P(v),l)
+#define sw_strndup(v,l)                       estrndup(Z_STRVAL_P(v),l)
 #define sw_php_format_date                    php_format_date
 #define sw_php_url_encode                     php_url_encode
 #define SW_RETURN_STRINGL                     RETURN_STRINGL
 #define sw_zend_register_internal_class_ex    zend_register_internal_class_ex
 #define sw_zend_call_method_with_2_params     zend_call_method_with_2_params
-#define zend_size_t                           int
+typedef int zend_size_t;
 
-#define SWOOLE_GET_SERVER(zobject, serv) zval *zserv;\
-    if (sw_zend_hash_find(Z_OBJPROP_P(zobject), ZEND_STRS("_server"), (void **) &zserv) == FAILURE){ \
-    php_error_docref(NULL TSRMLS_CC, E_WARNING, "Not have swoole server");\
-    RETURN_FALSE;}\
-    ZEND_FETCH_RESOURCE(serv, swServer *, &zserv, -1, SW_RES_SERVER_NAME, le_swoole_server);
-
-#define SWOOLE_GET_WORKER(zobject, process) zval *zprocess;\
-    if (sw_zend_hash_find(Z_OBJPROP_P(zobject), ZEND_STRS("_process"), (void **) &zprocess) == FAILURE){ \
-    php_error_docref(NULL TSRMLS_CC, E_WARNING, "Not have process");\
-    RETURN_FALSE;}\
-    ZEND_FETCH_RESOURCE(process, swWorker *, &zprocess, -1, SW_RES_PROCESS_NAME, le_swoole_process);
-
-#define WRAPPER_ZEND_HASH_FOREACH_VAL(ht, entry)\
-                zval **tmp = NULL;\
-                for (zend_hash_internal_pointer_reset(ht);\
-                     zend_hash_has_more_elements(ht) == SUCCESS; \
-                     zend_hash_move_forward(ht)) {\
-                     if (zend_hash_get_current_data(ht, (void**)&tmp) == FAILURE) {\
+#define SW_HASHTABLE_FOREACH_START(ht, entry)\
+    zval **tmp = NULL;\
+    for (zend_hash_internal_pointer_reset(ht);\
+        zend_hash_has_more_elements(ht) == SUCCESS; \
+        zend_hash_move_forward(ht)) {\
+        if (zend_hash_get_current_data(ht, (void**)&tmp) == FAILURE) {\
             continue;\
-                       }\
-                       entry = *tmp;
-#define WRAPPER_ZEND_HASH_FOREACH_END() }
+        }\
+        entry = *tmp;
+
+#if defined(HASH_KEY_NON_EXISTANT) && !defined(HASH_KEY_NON_EXISTENT)
+#define HASH_KEY_NON_EXISTENT HASH_KEY_NON_EXISTANT
+#endif
+
+#define SW_HASHTABLE_FOREACH_START2(ht, k, klen, ktype, entry)\
+    zval **tmp = NULL; ulong idx;\
+    for (zend_hash_internal_pointer_reset(ht); \
+            (ktype = zend_hash_get_current_key_ex(ht, &k, &klen, &idx, 0, NULL)) != HASH_KEY_NON_EXISTENT; \
+            zend_hash_move_forward(ht)\
+        ) { \
+    if (zend_hash_get_current_data(ht, (void**)&tmp) == FAILURE) {\
+        continue;\
+    }\
+    entry = *tmp;\
+    klen --;
+
+#define SW_HASHTABLE_FOREACH_END() }
 #define sw_zend_read_property                  zend_read_property
-#define wrapper_zend_hash_get_current_key(a,b,c,d) zend_hash_get_current_key_ex(a,b,c,d,0,NULL)
+#define sw_zend_hash_get_current_key(a,b,c,d)  zend_hash_get_current_key_ex(a,b,c,d,0,NULL)
+
+static inline int SW_Z_TYPE_P(zval *z)
+{
+    if (Z_TYPE_P(z) == IS_BOOL)
+    {
+        if ((uint8_t) Z_BVAL_P(z) == 1)
+        {
+            return IS_TRUE;
+        }
+        else
+        {
+            return 0;
+        }
+    }
+    else
+    {
+        return Z_TYPE_P(z);
+    }
+}
+
 #define sw_php_var_serialize(a,b,c)       php_var_serialize(a,&b,c)
 #define IS_TRUE    1
 inline int SW_Z_TYPE_P(zval *z);
 #define SW_Z_TYPE_PP(z)        SW_Z_TYPE_P(*z)
 #else
 #define sw_php_var_serialize                php_var_serialize
-#define zend_size_t                         size_t
+typedef size_t zend_size_t;
 #define SW_RETVAL_STRINGL(s, l,dup)         RETVAL_STRINGL(s,l)
 #define ZEND_SET_SYMBOL(ht,str,arr) zend_hash_str_update(ht, str, sizeof(str)-1, arr);
-inline int Z_BVAL_P(zval *v);
+
+static inline int Z_BVAL_P(zval *v)
+{
+    if (Z_TYPE_P(v) == IS_TRUE)
+    {
+        return 1;
+    }
+    else
+    {
+        return 0;
+    }
+}
+
 #define sw_add_assoc_stringl(__arg, __key, __str, __length, __duplicate) sw_add_assoc_stringl_ex(__arg, __key, strlen(__key)+1, __str, __length, __duplicate)
-inline int sw_add_assoc_stringl_ex(zval *arg, const char *key, size_t key_len, char *str, size_t length,int duplicate);
+static inline int sw_add_assoc_stringl_ex(zval *arg, const char *key, size_t key_len, char *str, size_t length,int duplicate)
+{
+    key_len--;
+    return add_assoc_stringl_ex(arg, key, key_len, str, length);
+}
+
 #define SW_Z_ARRVAL_P(z)                          Z_ARRVAL_P(z)->ht
-#define WRAPPER_ZEND_HASH_FOREACH_VAL(ht, entry)  ZEND_HASH_FOREACH_VAL(ht, entry){
-#define WRAPPER_ZEND_HASH_FOREACH_END() }ZEND_HASH_FOREACH_END();
+
+#define SW_HASHTABLE_FOREACH_START(ht, _val) ZEND_HASH_FOREACH_VAL(ht, _val);  {
+#define SW_HASHTABLE_FOREACH_START2(ht, k, klen, ktype, _val) zend_string *_foreach_key;\
+    ZEND_HASH_FOREACH_STR_KEY_VAL(ht, _foreach_key, _val);\
+    k = _foreach_key->val, klen=_foreach_key->len; ktype = 1; {
+
+#define SW_HASHTABLE_FOREACH_END()                 } ZEND_HASH_FOREACH_END();
+
 #define Z_ARRVAL_PP(s)                             Z_ARRVAL_P(*s)
 #define SW_Z_TYPE_P                                Z_TYPE_P
 #define SW_Z_TYPE_PP(s)                            SW_Z_TYPE_P(*s)
@@ -102,12 +166,30 @@ inline int sw_add_assoc_stringl_ex(zval *arg, const char *key, size_t key_len, c
 #define sw_strndup(s,l)                            \
         ({zend_string *str = zend_string_copy(Z_STR_P(s));\
         str->val;})
-inline char * sw_php_format_date(char *format, size_t format_len, time_t ts, int localtime);
 
-inline char * sw_php_url_encode(char *value, size_t value_len, int* exten);
+static inline char* sw_php_format_date(char *format, size_t format_len, time_t ts, int localtime)
+{
+    zend_string *time = php_format_date(format, format_len, ts, localtime);
+    char *return_str = (char*) emalloc(time->len + 1);
+    memcpy(return_str, time->val, time->len);
+    return_str[time->len] = 0;
+    return return_str;
+}
 
-#define sw_zval_add_ref(p) Z_TRY_ADDREF_P(*p)
-#define sw_zval_ptr_dtor(p)
+static inline char * sw_php_url_encode(char *value, size_t value_len, int* exten)
+{
+    zend_string *str = php_url_encode(value, value_len);
+    *exten = str->len;
+
+    char *return_str = (char*) emalloc(str->len);
+    memcpy(return_str, str->val, str->len);
+    zend_string_release(str);
+
+    return return_str;
+}
+
+#define sw_zval_add_ref(p)   Z_TRY_ADDREF_P(*p)
+#define sw_zval_ptr_dtor(p)  zval_ptr_dtor(*p)
 #define sw_call_user_function_ex(function_table, object_pp, function_name, retval_ptr_ptr, param_count, params, no_separation, ymbol_table)\
     ({zval  real_params[param_count];\
     int i=0;\
@@ -121,33 +203,14 @@ inline char * sw_php_url_encode(char *value, size_t value_len, int* exten);
 #define sw_php_var_unserialize(rval, p, max, var_hash)\
 php_var_unserialize(*rval, p, max, var_hash)
 
-extern zval _sw_zval_data0;
-extern zval _sw_zval_data1;
-extern zval _sw_zval_data2;
-extern zval _sw_zval_data3;
-extern zval _sw_zval_data4;
-
-#define SW_MAKE_STD_ZVAL(p,o)    switch(o){                           \
-    case 0:                              \
-       { bzero(&_sw_zval_data0, sizeof(zval)); p = &_sw_zval_data0; break;}\
-    case 1:                              \
-       { bzero(&_sw_zval_data1, sizeof(zval)); p = &_sw_zval_data1; break;}\
-    case 2:                              \
-       { bzero(&_sw_zval_data2, sizeof(zval)); p = &_sw_zval_data2; break;}\
-    case 3:                              \
-       { bzero(&_sw_zval_data3, sizeof(zval)); p = &_sw_zval_data3; break;}\
-    case 4:                              \
-       { bzero(&_sw_zval_data4, sizeof(zval)); p = &_sw_zval_data4; break;}\
-    default:                             \
-        break;\
-    }
+#define SW_MAKE_STD_ZVAL(p)    zval _stack_zval_##p; p = &(_stack_zval_##p)
 
 #define SW_RETURN_STRINGL(z,l,t)                      \
                zval key;\
                 ZVAL_STRING(&key, z);\
                 RETURN_STR(Z_STR(key))
 
-#define SW_ALLOC_INIT_ZVAL(p,o)        SW_MAKE_STD_ZVAL(p,o)
+#define SW_ALLOC_INIT_ZVAL(p)        SW_MAKE_STD_ZVAL(p)
 #define SW_ZEND_FETCH_RESOURCE_NO_RETURN(rsrc, rsrc_type, passed_id, default_id, resource_type_name, resource_type)        \
         (rsrc = (rsrc_type) zend_fetch_resource(Z_RES_P(*passed_id), resource_type_name, resource_type))
 #define SW_ZEND_REGISTER_RESOURCE(return_value, result, le_result)  ZVAL_RES(return_value,zend_register_resource(result, le_result))
@@ -161,15 +224,94 @@ extern zval _sw_zval_data4;
 #define SW_ZVAL_STRING(z,s,dup)               ZVAL_STRING(z,s)
 #define sw_smart_str                          smart_string
 
-inline zval * sw_zend_read_property(zend_class_entry *class_ptr,zval *obj,char *s, int len,int what);
-inline int sw_zend_is_callable(zval *cv, int a, char **name);
-inline int sw_zend_hash_del(HashTable *ht, char *k, int len);
-inline int sw_zend_hash_add(HashTable *ht, char *k, int len,void *pData,int datasize,void **pDest);
-inline int sw_zend_hash_index_update(HashTable *ht, int key,void *pData,int datasize,void **pDest);
-inline int sw_zend_hash_update(HashTable *ht, char *k, int len ,void * val,int size,void *ptr);
-inline int wrapper_zend_hash_get_current_key( HashTable *ht, char **key, uint *idx, ulong *num);
-inline int sw_zend_hash_find(HashTable *ht, char *k, int len, void **v);
-inline int sw_zend_hash_exists(HashTable *ht, char *k, int len);
+static inline zval* sw_zend_read_property(zend_class_entry *class_ptr,zval *obj,char *s, int len,int what)
+{
+    zval rv;
+    return zend_read_property(class_ptr, obj, s, len, 0, &rv TSRMLS_CC);
+}
+
+static inline int sw_zend_is_callable(zval *cb, int a, char **name)
+{
+    zend_string *key;
+    int ret = zend_is_callable(cb, a, &key);
+    char * tmp = (char *)emalloc(key->len);
+    memcpy(tmp, key->val, key->len);
+    *name = tmp;
+    return ret;
+}
+
+static inline int sw_zend_hash_del(HashTable *ht, char *k, int len)
+{
+    zval key;
+    ZVAL_STRING(&key, k);
+    return zend_hash_del(ht, Z_STR(key));
+}
+
+static inline int sw_zend_hash_add(HashTable *ht, char *k, int len,void *pData,int datasize,void **pDest)
+{
+    zval key;
+    ZVAL_STRING(&key, k);
+    zval **real_p = pData;
+
+    return zend_hash_add(ht, Z_STR(key), *real_p) ? SUCCESS : FAILURE;
+}
+
+static inline int sw_zend_hash_index_update(HashTable *ht, int key,void *pData,int datasize,void **pDest)
+{
+    zval **real_p = pData;
+    return zend_hash_index_update(ht, key, *real_p) ? SUCCESS : FAILURE;
+}
+
+static inline int sw_zend_hash_update(HashTable *ht, char *k, int len ,void * val,int size,void *ptr)
+{
+    zval key;
+    ZVAL_STRING(&key, k);
+
+    return zend_hash_update(ht, Z_STR(key), val) ? SUCCESS : FAILURE;
+}
+
+static inline int sw_zend_hash_get_current_key( HashTable *ht, char **key, uint32_t *keylen, ulong *num)
+{
+    zend_string *_key_ptr;
+    int type = zend_hash_get_current_key(ht, &_key_ptr, (zend_ulong*) num);
+    *key = _key_ptr->val;
+    *keylen = _key_ptr->len;
+    return type;
+}
+
+static inline int sw_zend_hash_find(HashTable *ht, char *k, int len, void **v)
+{
+    zval key;
+    ZVAL_STRINGL(&key, k, len -1);
+    zval *value = zend_hash_find(ht, Z_STR(key));
+
+    if (value == NULL)
+    {
+        return FAILURE;
+    }
+    else
+    {
+        *v = (void *) value;
+        v = (void *) value;
+        return SUCCESS;
+    }
+}
+
+static inline int sw_zend_hash_exists(HashTable *ht, char *k, int len)
+{
+    zval key;
+    ZVAL_STRING(&key, k);
+    zval *value = zend_hash_find(ht, Z_STR(key));
+
+    if (value == NULL)
+    {
+        return FAILURE;
+    }
+    else
+    {
+        return SUCCESS;
+    }
+}
 #endif
 
 #endif /* EXT_SWOOLE_PHP7_WRAPPER_H_ */

@@ -126,16 +126,16 @@ typedef struct _swReactorThread
     int c_udp_fd;
 } swReactorThread;
 
-typedef struct _swListenList_node
+typedef struct _swListenPort
 {
-    struct _swListenList_node *next, *prev;
+    struct _swListenPort *next, *prev;
     uint8_t type;
     uint8_t ssl;
     int port;
     int sock;
     pthread_t thread_id;
     char host[SW_HOST_MAXSIZE];
-} swListenList_node;
+} swListenPort;
 
 typedef struct _swUserWorker_node
 {
@@ -153,7 +153,6 @@ typedef struct {
 
 typedef struct
 {
-
     uint16_t num;
 } swUserWorker;
 
@@ -316,11 +315,6 @@ struct _swServer
     uint32_t open_eof_check :1;
 
     /**
-     * split the package use eof
-     */
-    uint32_t open_eof_split :1;
-
-    /**
      * built-in http protocol
      */
     uint32_t open_http_protocol :1;
@@ -356,9 +350,11 @@ struct _swServer
     uint32_t discard_timeout_request :1;
 
     /**
-     * save error packets to file system
+     * parse x-www-form-urlencoded data
      */
-    uint32_t save_error_packet :1;
+    uint32_t http_parse_post :1;
+
+    uint32_t enable_unsafe_event :1;
 
     /**
      * open tcp_defer_accept option
@@ -377,7 +373,7 @@ struct _swServer
     uint16_t heartbeat_idle_time; //心跳存活时间
     uint16_t heartbeat_check_interval; //心跳定时侦测时间, 必需小于heartbeat_idle_time
 
-    int * cpu_affinity_available;
+    int *cpu_affinity_available;
     int cpu_affinity_available_num;
     
     uint8_t listen_port_num;
@@ -417,7 +413,7 @@ struct _swServer
     swReactor reactor;
     swFactory factory;
 
-    swListenList_node *listen_list;
+    swListenPort *listen_list;
 
     swUserWorker_node *user_worker_list;
     swHashMap *user_worker_map;
@@ -461,7 +457,6 @@ struct _swServer
     int (*onFinish)(swServer *serv, swEventData *data);
 
     int (*send)(swServer *, swSendData *);
-    int (*get_package_length)(swProtocol *protocol, swConnection *conn, char *data, uint32_t length);
 };
 
 typedef struct _swSocketLocal
@@ -499,7 +494,7 @@ int swServer_add_listener(swServer *serv, int type, char *host,int port);
 int swServer_add_worker(swServer *serv, swWorker *worker);
 
 int swServer_create(swServer *serv);
-int swServer_listen(swServer *serv, swReactor *reactor);
+int swServer_listen(swServer *serv, swListenPort *ls);
 int swServer_free(swServer *serv);
 int swServer_shutdown(swServer *serv);
 
@@ -690,7 +685,11 @@ static sw_inline uint32_t swServer_worker_schedule(swServer *serv, uint32_t sche
     else if (serv->dispatch_mode == SW_DISPATCH_UIDMOD)
     {
         swConnection *conn = swServer_connection_get(serv, schedule_key);
-        if (conn->uid)
+        if (conn == NULL)
+        {
+            target_worker_id = schedule_key % serv->worker_num;
+        }
+        else if (conn->uid)
         {
             target_worker_id = conn->uid % serv->worker_num;
         }
@@ -768,6 +767,8 @@ int swReactorThread_send2worker(void *data, int len, uint16_t target_worker_id);
 int swReactorProcess_create(swServer *serv);
 int swReactorProcess_start(swServer *serv);
 int swReactorProcess_onClose(swReactor *reactor, swEvent *event);
+
+int swManager_start(swFactory *factory);
 
 #ifdef __cplusplus
 }

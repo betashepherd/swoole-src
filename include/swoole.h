@@ -53,6 +53,7 @@ extern "C" {
 #include <sys/wait.h>
 #include <sys/un.h>
 #include <sys/types.h>
+#include <sys/utsname.h>
 
 #ifdef __MACH__
 #include <mach/clock.h>
@@ -162,7 +163,13 @@ int daemon(int nochdir, int noclose);
 #define SW_DECLINED           -5
 #define SW_ABORT              -6
 //-------------------------------------------------------------------------------
-
+enum swReturnType
+{
+    SW_CONTINUE = 1,
+    SW_WAIT     = 2,
+    SW_CLOSE    = 3,
+    SW_ERROR    = 4,
+};
 //-------------------------------------------------------------------------------
 enum swFd_type
 {
@@ -275,22 +282,14 @@ write(SwooleG.debug_fd, sw_error, __debug_log_n);
 
 enum swTraceType
 {
-    SW_TRACE_SERVER = 1,
-    SW_TRACE_CLIENT = 2,
-    SW_TRACE_BUFFER = 3,
-    SW_TRACE_CONN = 4,
-    SW_TRACE_EVENT = 5,
-    SW_TRACE_WORKER = 6,
-    SW_TRACE_MEMORY = 7,
+    SW_TRACE_SERVER  = 1,
+    SW_TRACE_CLIENT  = 2,
+    SW_TRACE_BUFFER  = 3,
+    SW_TRACE_CONN    = 4,
+    SW_TRACE_EVENT   = 5,
+    SW_TRACE_WORKER  = 6,
+    SW_TRACE_MEMORY  = 7,
     SW_TRACE_REACTOR = 8,
-};
-
-enum
-{
-	SW_CONTINUE = 1,
-	SW_WAIT,
-	SW_CLOSE,
-	SW_ERROR,
 };
 
 #if SW_LOG_TRACE_OPEN == 1
@@ -306,7 +305,6 @@ snprintf(sw_error,SW_ERROR_MSG_SIZE,"%s: "str,__func__,##__VA_ARGS__);\
 swLog_put(SW_LOG_TRACE, sw_error);\
 SwooleGS->lock.unlock(&SwooleGS->lock);}
 #endif
-
 
 #define swYield()              sched_yield() //or usleep(1)
 //#define swYield()              usleep(500000)
@@ -328,23 +326,6 @@ typedef struct
     uint32_t fd :24;
     uint32_t reactor_id :8;
 } swSession;
-
-typedef struct
-{
-    /* one package: eof check */
-
-    uint8_t package_eof_len;  //数据缓存结束符长度
-    char package_eof[SW_DATA_EOF_MAXLEN + 1];  //数据缓存结束符
-
-    char package_length_type;  //length field type
-    uint8_t package_length_size;
-    uint16_t package_length_offset;  //第几个字节开始表示长度
-    uint16_t package_body_offset;  //第几个字节开始计算长度
-    uint32_t package_max_length;
-
-    int (*onPackage)(void *, char *, uint32_t);
-
-} swProtocol;
 
 typedef struct
 {
@@ -457,15 +438,29 @@ typedef struct _swConnection
      */
     uint8_t websocket_status;
 
-    sw_atomic_t lock;
-
 #ifdef SW_USE_OPENSSL
     SSL *ssl;
     uint32_t ssl_state;
 #endif
-
+    sw_atomic_t lock;
 } swConnection;
 
+typedef struct _swProtocol
+{
+    /* one package: eof check */
+    uint8_t split_by_eof;
+    uint8_t package_eof_len;  //数据缓存结束符长度
+    char package_eof[SW_DATA_EOF_MAXLEN + 1];  //数据缓存结束符
+
+    char package_length_type;  //length field type
+    uint8_t package_length_size;
+    uint16_t package_length_offset;  //第几个字节开始表示长度
+    uint16_t package_body_offset;  //第几个字节开始计算长度
+    uint32_t package_max_length;
+
+    int (*onPackage)(swConnection *conn, char *data, uint32_t length);
+    int (*get_package_length)(struct _swProtocol *protocol, swConnection *conn, char *data, uint32_t length);
+} swProtocol;
 //------------------------------String--------------------------------
 typedef struct _swString
 {
@@ -812,6 +807,7 @@ enum swProcessType
     SW_PROCESS_WORKER     = 2,
     SW_PROCESS_MANAGER    = 3,
     SW_PROCESS_TASKWORKER = 4,
+    SW_PROCESS_USERWORKER = 5,
 };
 
 #define swIsMaster()          (SwooleG.process_type==SW_PROCESS_MASTER)
@@ -829,7 +825,7 @@ uint64_t swoole_hash_key(char *str, int str_len);
 uint32_t swoole_common_multiple(uint32_t u, uint32_t v);
 uint32_t swoole_common_divisor(uint32_t u, uint32_t v);
 
-static sw_inline uint32_t swoole_unpack(char type, void *data)
+static sw_inline int32_t swoole_unpack(char type, void *data)
 {
     int64_t tmp;
 
@@ -943,15 +939,15 @@ int swoole_tmpfile(char *filename);
 swString* swoole_file_get_contents(char *filename);
 void swoole_open_remote_debug(void);
 char *swoole_dec2hex(int value, int base);
+int swoole_version_compare(char *version1, char *version2);
 
 void swoole_ioctl_set_block(int sock, int nonblock);
 void swoole_fcntl_set_block(int sock, int nonblock);
 
 //----------------------core function---------------------
-int swSetTimeout(int sock, double timeout);
+int swSocket_set_timeout(int sock, double timeout);
 int swRead(int, void *, int);
 int swWrite(int, void *, int);
-int swAccept(int server_socket, struct sockaddr_in *addr, int addr_len);
 
 #ifdef SW_USE_IOCTL
 #define swSetNonBlock(sock)   swoole_ioctl_set_block(sock, 1)
@@ -973,6 +969,7 @@ int swSocket_create(int type);
 int swSocket_wait(int fd, int timeout_ms, int events);
 void swSocket_clean(int fd, void *buf, int len);
 int swSocket_sendto_blocking(int fd, void *__buf, size_t __n, int flag, struct sockaddr *__addr, socklen_t __addr_len);
+int swSocket_set_buffer_size(int fd, int buffer_size);
 int swSocket_udp_sendto(int server_sock, char *dst_ip, int dst_port, char *data, uint32_t len);
 int swSocket_udp_sendto6(int server_sock, char *dst_ip, int dst_port, char *data, uint32_t len);
 int swSocket_sendfile_sync(int sock, char *filename, double timeout);
@@ -990,6 +987,21 @@ static sw_inline int swWaitpid(pid_t __pid, int *__stat_loc, int __options)
         }
         break;
     } while(1);
+    return ret;
+}
+
+static sw_inline int swKill(pid_t __pid, int __sig)
+{
+    int ret;
+    do
+    {
+        ret = kill(__pid, __sig);
+        if (ret < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        break;
+    } while (1);
     return ret;
 }
 
@@ -1034,7 +1046,6 @@ struct swReactor_s
     uint32_t max_event_num;
 
     uint32_t check_timer :1;
-
     uint32_t running :1;
 
     /**
@@ -1294,6 +1305,7 @@ pid_t swProcessPool_spawn(swWorker *worker);
 int swProcessPool_dispatch(swProcessPool *pool, swEventData *data, int *worker_id);
 int swProcessPool_dispatch_blocking(swProcessPool *pool, swEventData *data, int *dst_worker_id);
 int swProcessPool_add_worker(swProcessPool *pool, swWorker *worker);
+int swProcessPool_del_worker(swProcessPool *pool, swWorker *worker);
 
 static sw_inline swWorker* swProcessPool_get_worker(swProcessPool *pool, int worker_id)
 {
@@ -1384,7 +1396,8 @@ int swThreadPool_free(swThreadPool *pool);
 
 //--------------------------------protocol------------------------------
 int swProtocol_get_package_length(swProtocol *protocol, swConnection *conn, char *data, uint32_t size);
-int swProtocol_split_package_by_eof(swProtocol *protocol, void *object, swString *buffer);
+int swProtocol_recv_check_length(swProtocol *protocol, swConnection *conn, swString *buffer);
+int swProtocol_recv_check_eof(swProtocol *protocol, swConnection *conn, swString *buffer);
 
 //--------------------------------timer------------------------------
 typedef struct _swTimer_node
@@ -1395,7 +1408,8 @@ typedef struct _swTimer_node
     uint32_t exec_msec;
     uint32_t interval;
     long id;
-    uint8_t remove;
+    uint8_t remove :1;
+    uint8_t restart :1;
 } swTimer_node;
 
 typedef struct _swTimer
@@ -1408,13 +1422,19 @@ typedef struct _swTimer
     int use_pipe;
     int lasttime;
     int fd;
+    int lock;
     long _next_id;
+    long _current_id;
+    long _delete_id;
     swPipe pipe;
     /*-----------------for EventTimer-------------------*/
     struct timeval basetime;
+    /*-----------------wait delete----------------------*/
+    swArray *delete_list;
+    swArray *insert_list;
     /*--------------------------------------------------*/
     long (*add)(struct _swTimer *timer, int _msec, int _interval, void *data);
-    void* (*del)(struct _swTimer *timer, int _interval_ms, int id);
+    void* (*del)(struct _swTimer *timer, int _interval_ms, long id);
     int (*select)(struct _swTimer *timer);
     void (*free)(struct _swTimer *timer);
     /*-----------------event callback-------------------*/
@@ -1428,9 +1448,10 @@ void swTimer_signal_handler(int sig);
 int swTimer_event_handler(swReactor *reactor, swEvent *event);
 void swTimer_node_insert(swTimer_node **root, swTimer_node *new_node);
 void swTimer_node_print(swTimer_node **root);
-swTimer_node* swTimer_node_find(swTimer_node **root, int interval_msec, int id);
+swTimer_node* swTimer_node_find(swTimer_node **root, int interval_msec, long id);
+void swTimer_node_delete(swTimer_node **root, swTimer_node *node);
+void swTimer_node_remove(swTimer_node **root, swTimer_node *node);
 void swTimer_node_destory(swTimer_node **root);
-
 //--------------------------------------------------------------
 typedef struct _swModule
 {
@@ -1458,6 +1479,7 @@ typedef struct
 
     swProcessPool task_workers;
     swProcessPool event_workers;
+    swProcessPool user_workers;
 
 } swServerGS;
 
@@ -1513,6 +1535,7 @@ typedef struct
     uint8_t running :1;
     uint8_t use_timerfd :1;
     uint8_t use_signalfd :1;
+    uint8_t reuse_port :1;
 
     /**
      * Timer used pipe
@@ -1554,6 +1577,7 @@ typedef struct
 
     uint32_t pagesize;
     uint32_t max_sockets;
+    struct utsname uname;
 
     /**
      * Unix socket default buffer size

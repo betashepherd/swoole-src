@@ -40,7 +40,7 @@
 #include "Client.h"
 #include "async.h"
 
-#define PHP_SWOOLE_VERSION  "1.7.18-alpha"
+#define PHP_SWOOLE_VERSION  "1.7.19-alpha"
 #define PHP_SWOOLE_CHECK_CALLBACK
 
 /**
@@ -62,14 +62,6 @@ typedef struct
     uint16_t from_fd;
 } php_swoole_udp_t;
 
-typedef struct _swTimer_callback
-{
-    zval* callback;
-    zval* data;
-    int interval;
-    int type;
-} swTimer_callback;
-
 extern zend_module_entry swoole_module_entry;
 
 #define phpext_swoole_ptr &swoole_module_entry
@@ -82,10 +74,15 @@ extern zend_module_entry swoole_module_entry;
 #	define PHP_SWOOLE_API
 #endif
 
+#define SWOOLE_PROPERTY_MAX     32
+#define SWOOLE_OBJECT_MAX       1000000
+
 typedef struct
 {
     void **array;
     uint32_t size;
+    void **property[SWOOLE_PROPERTY_MAX];
+    uint32_t property_size[SWOOLE_PROPERTY_MAX];
 } swoole_object_array;
 
 #ifdef ZTS
@@ -103,7 +100,7 @@ extern swoole_object_array swoole_objects;
 
 #define swoole_php_error(level, fmt_str, ...)   if (SWOOLE_G(display_errors)) php_error_docref(NULL TSRMLS_CC, level, fmt_str, ##__VA_ARGS__)
 #define swoole_php_fatal_error(level, fmt_str, ...)   php_error_docref(NULL TSRMLS_CC, level, fmt_str, ##__VA_ARGS__)
-#define swoole_php_sys_error(level, fmt_str, ...)   php_error_docref(NULL TSRMLS_CC, level, fmt_str" Error: %s[%d].", ##__VA_ARGS__, strerror(errno), errno)
+#define swoole_php_sys_error(level, fmt_str, ...)  if (SWOOLE_G(display_errors)) php_error_docref(NULL TSRMLS_CC, level, fmt_str" Error: %s[%d].", ##__VA_ARGS__, strerror(errno), errno)
 
 #ifdef SW_ASYNC_MYSQL
 #if defined(SW_HAVE_MYSQLI) && defined(SW_HAVE_MYSQLND)
@@ -157,39 +154,6 @@ extern swoole_object_array swoole_objects;
 //---------------------------------------------------------
 #define php_swoole_socktype(type)           (type & (~SW_FLAG_SYNC) & (~SW_FLAG_ASYNC) & (~SW_FLAG_KEEP))
 #define php_swoole_array_length(array)      (Z_ARRVAL_P(array)->nNumOfElements)
-static sw_inline void* swoole_get_object(zval *object)
-{
-#if PHP_MAJOR_VERSION < 7
-zend_object_handle handle = Z_OBJ_HANDLE_P(object);
-#else
-int handle = (int)Z_OBJ_HANDLE(*object);
-#endif
-    
-    assert(handle < swoole_objects.size);
-    return  swoole_objects.array[handle];
-}
-
-static sw_inline void swoole_set_object(zval *object, void *ptr)
-{
-#if PHP_MAJOR_VERSION < 7
-    zend_object_handle handle = Z_OBJ_HANDLE_P(object);
-#else
-    int handle = (int) Z_OBJ_HANDLE(*object);
-#endif
-    if (handle >= swoole_objects.size)
-    {
-        uint32_t old_size = swoole_objects.size;
-        swoole_objects.size = old_size * 2;
-        if (swoole_objects.size > SW_MAX_SOCKET_ID)
-        {
-            swoole_objects.size = SW_MAX_SOCKET_ID;
-        }
-        assert(handle < SW_MAX_SOCKET_ID);
-        swoole_objects.array = erealloc(swoole_objects.array, swoole_objects.size);
-        bzero(swoole_objects.array + (old_size * sizeof(void*)), (swoole_objects.size - old_size) * sizeof(void**));
-    }
-    swoole_objects.array[handle] = ptr;
-}
 
 #define SW_LONG_CONNECTION_KEY_LEN          64
 
@@ -205,7 +169,21 @@ extern zend_class_entry *swoole_http_server_class_entry_ptr;
 extern zval *php_sw_callback[PHP_SERVER_CALLBACK_NUM];
 
 extern HashTable php_sw_long_connections;
-extern HashTable php_sw_aio_callback;
+
+#define PHP_MEMORY_DEBUG  0
+
+#if PHP_MEMORY_DEBUG
+typedef struct
+{
+    int new_client;
+    int free_client;
+    int new_http_response;
+    int new_http_request;
+    int free_http_response;
+    int free_http_request;
+} php_vmstat_t;
+extern php_vmstat_t php_vmstat;
+#endif
 
 PHP_MINIT_FUNCTION(swoole);
 PHP_MSHUTDOWN_FUNCTION(swoole);
@@ -254,6 +232,7 @@ PHP_METHOD(swoole_server, stats);
 PHP_METHOD(swoole_server, bind);
 PHP_METHOD(swoole_server, sendto);
 PHP_METHOD(swoole_server, sendwait);
+PHP_METHOD(swoole_server, exist);
 
 PHP_FUNCTION(swoole_event_add);
 PHP_FUNCTION(swoole_event_set);
@@ -290,6 +269,7 @@ void swoole_destory_table(zend_resource *rsrc TSRMLS_DC);
 void swoole_async_init(int module_number TSRMLS_DC);
 void swoole_table_init(int module_number TSRMLS_DC);
 void swoole_lock_init(int module_number TSRMLS_DC);
+void swoole_atomic_init(int module_number TSRMLS_DC);
 void swoole_client_init(int module_number TSRMLS_DC);
 void swoole_process_init(int module_number TSRMLS_DC);
 void swoole_http_init(int module_number TSRMLS_DC);
@@ -300,9 +280,37 @@ int php_swoole_process_start(swWorker *process, zval *object TSRMLS_DC);
 
 void php_swoole_check_reactor();
 void php_swoole_event_init();
+void php_swoole_event_wait();
 void php_swoole_check_timer(int interval);
 void php_swoole_register_callback(swServer *serv);
-long php_swoole_add_timer(int ms, zval *callback, zval *param, int is_tick TSRMLS_DC);
+
+static sw_inline void* swoole_get_object(zval *object)
+{
+#if PHP_MAJOR_VERSION < 7
+    zend_object_handle handle = Z_OBJ_HANDLE_P(object);
+#else
+    int handle = (int)Z_OBJ_HANDLE(*object);
+#endif
+    assert(handle < swoole_objects.size);
+    return swoole_objects.array[handle];
+}
+
+static sw_inline void* swoole_get_property(zval *object, int property_id)
+{
+#if PHP_MAJOR_VERSION < 7
+    zend_object_handle handle = Z_OBJ_HANDLE_P(object);
+#else
+    int handle = (int) Z_OBJ_HANDLE(*object);
+#endif
+    if (handle >= swoole_objects.property_size[property_id])
+    {
+        return NULL;
+    }
+    return swoole_objects.property[property_id][handle];
+}
+
+void swoole_set_object(zval *object, void *ptr);
+void swoole_set_property(zval *object, int property_id, void *ptr);
 
 zval *php_swoole_get_recv_data(zval *,swEventData *req TSRMLS_DC);
 int php_swoole_get_send_data(zval *zdata, char **str TSRMLS_DC);

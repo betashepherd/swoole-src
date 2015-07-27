@@ -28,8 +28,6 @@
 #include <ext/spl/spl_iterators.h>
 #endif
 
-HashTable php_sw_aio_callback;
-
 ZEND_DECLARE_MODULE_GLOBALS(swoole)
 
 extern sapi_module_struct sapi_module;
@@ -79,6 +77,10 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_INFO_EX(arginfo_swoole_server_sendwait, 0, 0, 2)
     ZEND_ARG_INFO(0, conn_fd)
     ZEND_ARG_INFO(0, send_data)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_swoole_server_exist, 0, 0, 1)
+    ZEND_ARG_INFO(0, conn_fd)
 ZEND_END_ARG_INFO()
 
 //for object style
@@ -335,6 +337,7 @@ static zend_function_entry swoole_server_methods[] = {
     PHP_FALIAS(send, swoole_server_send, arginfo_swoole_server_send_oo)
     PHP_ME(swoole_server, sendto, arginfo_swoole_server_sendto_oo, ZEND_ACC_PUBLIC)
     PHP_ME(swoole_server, sendwait, arginfo_swoole_server_sendwait, ZEND_ACC_PUBLIC)
+    PHP_ME(swoole_server, exist, arginfo_swoole_server_exist, ZEND_ACC_PUBLIC)
     PHP_FALIAS(sendfile, swoole_server_sendfile, arginfo_swoole_server_sendfile_oo)
     PHP_FALIAS(close, swoole_server_close, arginfo_swoole_server_close_oo)
     PHP_FALIAS(task, swoole_server_task, arginfo_swoole_server_task_oo)
@@ -375,6 +378,10 @@ static const zend_function_entry swoole_connection_iterator_methods[] =
     PHP_ME(swoole_connection_iterator, count,       arginfo_swoole_void, ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
+#endif
+
+#if PHP_MEMORY_DEBUG
+php_vmstat_t php_vmstat;
 #endif
 
 zend_class_entry swoole_server_ce;
@@ -426,6 +433,84 @@ static void php_swoole_init_globals(zend_swoole_globals *swoole_globals)
     swoole_globals->aio_thread_num = SW_AIO_THREAD_NUM_DEFAULT;
     swoole_globals->socket_buffer_size = SW_SOCKET_BUFFER_SIZE;
     swoole_globals->display_errors = 1;
+}
+
+void swoole_set_object(zval *object, void *ptr)
+{
+#if PHP_MAJOR_VERSION < 7
+    zend_object_handle handle = Z_OBJ_HANDLE_P(object);
+#else
+    int handle = (int) Z_OBJ_HANDLE(*object);
+#endif
+    assert(handle < SWOOLE_OBJECT_MAX);
+    if (handle >= swoole_objects.size)
+    {
+        uint32_t old_size = swoole_objects.size;
+        uint32_t new_size = old_size * 2;
+
+        void *old_ptr = swoole_objects.array;
+        void *new_ptr = NULL;
+
+        if (new_size > SWOOLE_OBJECT_MAX)
+        {
+            new_size = SWOOLE_OBJECT_MAX;
+        }
+        new_ptr = erealloc(old_ptr, sizeof(void*) * new_size);
+        if (!new_ptr)
+        {
+            return;
+        }
+        bzero(new_ptr + (old_size * sizeof(void*)), (new_size - old_size) * sizeof(void*));
+        swoole_objects.array = new_ptr;
+        swoole_objects.size = new_size;
+    }
+    swoole_objects.array[handle] = ptr;
+}
+
+void swoole_set_property(zval *object, int property_id, void *ptr)
+{
+#if PHP_MAJOR_VERSION < 7
+    zend_object_handle handle = Z_OBJ_HANDLE_P(object);
+#else
+    int handle = (int) Z_OBJ_HANDLE(*object);
+#endif
+    assert(handle < SWOOLE_OBJECT_MAX);
+
+    if (handle >= swoole_objects.property_size[property_id])
+    {
+        uint32_t old_size = swoole_objects.property_size[property_id];
+        uint32_t new_size = 0;
+
+        void *old_ptr = NULL;
+        void *new_ptr = NULL;
+
+        if (old_size == 0)
+        {
+            new_size = 65536;
+            new_ptr = ecalloc(new_size, sizeof(void *));
+        }
+        else
+        {
+            new_size = old_size * 2;
+            if (new_size > SWOOLE_OBJECT_MAX)
+            {
+                new_size = SWOOLE_OBJECT_MAX;
+            }
+            old_ptr = swoole_objects.property[property_id];
+            new_ptr = erealloc(old_ptr, new_size * sizeof(void *));
+        }
+        if (new_ptr == NULL)
+        {
+            return;
+        }
+        if (old_size > 0)
+        {
+            bzero(new_ptr + old_size * sizeof(void*), (new_size - old_size) * sizeof(void*));
+        }
+        swoole_objects.property_size[property_id] = new_size;
+        swoole_objects.property[property_id] = new_ptr;
+    }
+    swoole_objects.property[property_id][handle] = ptr;
 }
 
 #ifdef ZTS
@@ -513,6 +598,7 @@ PHP_MINIT_FUNCTION(swoole)
     swoole_process_init(module_number TSRMLS_CC);
     swoole_table_init(module_number TSRMLS_CC);
     swoole_lock_init(module_number TSRMLS_CC);
+    swoole_atomic_init(module_number TSRMLS_CC);
     swoole_http_init(module_number TSRMLS_CC);
     swoole_buffer_init(module_number TSRMLS_CC);
     swoole_websocket_init(module_number TSRMLS_CC);
@@ -626,8 +712,6 @@ PHP_MINFO_FUNCTION(swoole)
 
 PHP_RINIT_FUNCTION(swoole)
 {
-    //swoole_aio
-    zend_hash_init(&php_sw_aio_callback, 16, NULL, NULL, 0);
     //running
     SwooleG.running = 1;
 
@@ -644,7 +728,7 @@ PHP_RINIT_FUNCTION(swoole)
     }
 
     swoole_objects.size = 65536;
-    swoole_objects.array = emalloc(sizeof(void *) * swoole_objects.size);
+    swoole_objects.array = ecalloc(swoole_objects.size, sizeof(void*));
 
 #ifdef SW_DEBUG_REMOTE_OPEN
     swoole_open_remote_debug();
@@ -655,8 +739,6 @@ PHP_RINIT_FUNCTION(swoole)
 
 PHP_RSHUTDOWN_FUNCTION(swoole)
 {
-    zend_hash_destroy(&php_sw_aio_callback);
-
     int i;
     for (i = 0; i < PHP_SERVER_CALLBACK_NUM; i++)
     {
@@ -696,8 +778,17 @@ PHP_RSHUTDOWN_FUNCTION(swoole)
         }
     }
 
+    for(i = 0; i< SWOOLE_PROPERTY_MAX; i ++)
+    {
+        if (swoole_objects.property[i])
+        {
+            efree(swoole_objects.property[i]);
+        }
+    }
+
     efree(swoole_objects.array);
     bzero(&swoole_objects, sizeof(swoole_objects));
+
     SwooleWG.reactor_wait_onexit = 0;
 
     return SUCCESS;
@@ -726,30 +817,32 @@ PHP_FUNCTION(swoole_get_mysqli_sock)
 {
     MY_MYSQL *mysql;
     zval *mysql_link;
+    php_stream *stream;
     int sock;
 
     if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "z", &mysql_link) == FAILURE)
     {
         return;
     }
+
+#if PHP_MAJOR_VERSION > 5
+    MYSQLI_FETCH_RESOURCE_CONN(mysql, mysql_link, MYSQLI_STATUS_VALID);
+    stream = mysql->mysql->data->net->data->m.get_stream(mysql->mysql->data->net TSRMLS_CC);
+#elif PHP_MAJOR_VERSION == 5 && PHP_MINOR_VERSION > 4
     MYSQLI_FETCH_RESOURCE_CONN(mysql, &mysql_link, MYSQLI_STATUS_VALID);
-
-    php_stream *stream;
-
-#if PHP_MAJOR_VERSION == 5 && PHP_MINOR_VERSION > 4
     stream = mysql->mysql->data->net->data->m.get_stream(mysql->mysql->data->net TSRMLS_CC);
 #else
     stream = mysql->mysql->data->net->stream;
 #endif
 
     if (SUCCESS != php_stream_cast(stream, PHP_STREAM_AS_FD_FOR_SELECT | PHP_STREAM_CAST_INTERNAL, (void* )&sock, 1)
-    		&& sock >= 0)
+            && sock >= 0)
     {
-    	RETURN_FALSE;
+        RETURN_FALSE;
     }
     else
     {
-    	RETURN_LONG(sock);
+        RETURN_LONG(sock);
     }
 }
 #endif
@@ -783,31 +876,31 @@ PHP_FUNCTION(swoole_set_process_name)
     if (Z_STRLEN_P(name) == 0)
     {
         return;
-    }else if(Z_STRLEN_P(name)>127){
+    }
+    else if (Z_STRLEN_P(name) > 127)
+    {
         php_error_docref(NULL TSRMLS_CC, E_WARNING, "process name is too long,the max len is 127");
     }
 
-#if PHP_MAJOR_VERSION == 5 && PHP_MINOR_VERSION > 4
-
+#if PHP_MAJOR_VERSION >= 7 || (PHP_MAJOR_VERSION == 5 && PHP_MINOR_VERSION > 4)
     zval *retval;
     zval **args[1];
     args[0] = &name;
 
     zval *function;
-    MAKE_STD_ZVAL(function);
-    ZVAL_STRING(function, "cli_set_process_title", 1);
+    SW_MAKE_STD_ZVAL(function);
+    SW_ZVAL_STRING(function, "cli_set_process_title", 1);
 
-    if (call_user_function_ex(EG(function_table), NULL, function, &retval, 1, args, 0, NULL TSRMLS_CC) == FAILURE)
+    if (sw_call_user_function_ex(EG(function_table), NULL, function, &retval, 1, args, 0, NULL TSRMLS_CC) == FAILURE)
     {
         return;
     }
 
-    zval_ptr_dtor(&function);
+    sw_zval_ptr_dtor(&function);
     if (retval)
     {
-        zval_ptr_dtor(&retval);
+        sw_zval_ptr_dtor(&retval);
     }
-
 #else
     bzero(sapi_module.executable_location, 127);
     memcpy(sapi_module.executable_location, Z_STRVAL_P(name), Z_STRLEN_P(name));
