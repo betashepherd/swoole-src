@@ -44,7 +44,7 @@ static void swHeartbeatThread_loop(swThreadParam *param);
 static int swServer_send1(swServer *serv, swSendData *resp);
 static int swServer_send2(swServer *serv, swSendData *resp);
 
-static swConnection* swServer_connection_new(swServer *serv, int fd, int from_fd, int reactor_id);
+static swConnection* swServer_connection_new(swServer *serv, swListenPort *ls, int fd, int from_fd, int reactor_id);
 
 swServerG SwooleG;
 swServerGS *SwooleGS;
@@ -148,7 +148,7 @@ int swServer_master_onAccept(swReactor *reactor, swEvent *event)
         }
 
         //add to connection_list
-        swConnection *conn = swServer_connection_new(serv, new_fd, event->fd, reactor_id);
+        swConnection *conn = swServer_connection_new(serv, listen_host, new_fd, event->fd, reactor_id);
         memcpy(&conn->info.addr, &client_addr, sizeof(client_addr));
         sub_reactor = &serv->reactor_threads[reactor_id].reactor;
         conn->socket_type = listen_host->type;
@@ -416,7 +416,7 @@ int swServer_worker_init(swServer *serv, swWorker *worker)
     }
 #endif
 
-    SwooleWG.buffer_input = sw_malloc(sizeof(swString*) * serv->reactor_num);
+    SwooleWG.buffer_input = sw_malloc(sizeof(swString*) * (serv->reactor_num + serv->dgram_port_num));
     if (SwooleWG.buffer_input == NULL)
     {
         swError("malloc for SwooleWG.buffer_input failed.");
@@ -435,7 +435,7 @@ int swServer_worker_init(swServer *serv, swWorker *worker)
         buffer_input_size = SW_BUFFER_SIZE_BIG;
     }
 
-    for (i = 0; i < serv->reactor_num; i++)
+    for (i = 0; i < serv->reactor_num + serv->dgram_port_num; i++)
     {
         SwooleWG.buffer_input[i] = swString_new(buffer_input_size);
         if (SwooleWG.buffer_input[i] == NULL)
@@ -975,30 +975,14 @@ int swServer_add_listener(swServer *serv, int type, char *host, int port)
     strncpy(ls->host, host, SW_HOST_MAXSIZE);
     LL_APPEND(serv->listen_list, ls);
 
-    //UDP需要提前创建好
-    if (type == SW_SOCK_UDP || type == SW_SOCK_UDP6 || type == SW_SOCK_UNIX_DGRAM)
+    if (swSocket_is_dgram(ls->type))
     {
-        int sock = swSocket_listen(type, ls->host, port, serv->backlog);
-        if (sock < 0)
-        {
-            return SW_ERR;
-        }
-
-        int bufsize = SwooleG.socket_buffer_size;
-        setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
-        setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
-
-        ls->sock = sock;
-        ls->type = type;
         serv->have_udp_sock = 1;
-
-        if (type == SW_SOCK_UDP)
+        serv->dgram_port_num++;
+        //need to pre-listen
+        if (serv->factory_mode != SW_MODE_SINGLE)
         {
-            serv->udp_socket_ipv4 = sock;
-        }
-        else if (type == SW_SOCK_UDP6)
-        {
-            serv->udp_socket_ipv6 = sock;
+            swServer_listen(serv, ls);
         }
     }
     else
@@ -1022,14 +1006,32 @@ int swServer_add_listener(swServer *serv, int type, char *host, int port)
 
 /**
  * listen the TCP server socket
- * UDP ignore
  */
 int swServer_listen(swServer *serv, swListenPort *ls)
 {
     int sock = -1, sockopt;
-    //UDP
-    if (ls->type == SW_SOCK_UDP || ls->type == SW_SOCK_UDP6 || ls->type == SW_SOCK_UNIX_DGRAM)
+
+    if (swSocket_is_dgram(ls->type))
     {
+        int sock = swSocket_listen(ls->type, ls->host, ls->port, serv->backlog);
+        if (sock < 0)
+        {
+            return SW_ERR;
+        }
+
+        int bufsize = SwooleG.socket_buffer_size;
+        setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+        setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+        ls->sock = sock;
+
+        if (ls->type == SW_SOCK_UDP)
+        {
+            serv->udp_socket_ipv4 = sock;
+        }
+        else if (ls->type == SW_SOCK_UDP6)
+        {
+            serv->udp_socket_ipv6 = sock;
+        }
         return SW_OK;
     }
 
@@ -1272,7 +1274,7 @@ static void swHeartbeatThread_loop(swThreadParam *param)
 /**
  * new connection
  */
-static swConnection* swServer_connection_new(swServer *serv, int fd, int from_fd, int reactor_id)
+static swConnection* swServer_connection_new(swServer *serv, swListenPort *ls, int fd, int from_fd, int reactor_id)
 {
     swConnection* connection = NULL;
 
@@ -1314,7 +1316,7 @@ static swConnection* swServer_connection_new(swServer *serv, int fd, int from_fd
     connection->active = 1;
 
 #ifdef SW_REACTOR_SYNC_SEND
-    if (serv->factory_mode != SW_MODE_THREAD)
+    if (serv->factory_mode != SW_MODE_THREAD && !ls->ssl)
     {
         connection->direct_send = 1;
     }

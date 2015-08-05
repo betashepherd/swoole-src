@@ -14,7 +14,7 @@ The network layer in Swoole is event-based and takes full advantage of the under
 concurrent
 ------
 
-In the request processing part, Swoole uses a multi-process model. Every process works as a worker. All business logic is executed in workers, synchronously.
+On the request processing part, Swoole uses a multi-process model. Every process works as a worker. All business logic is executed in workers, synchronously.
 
 With the synchronous logic execution, you can easily write large and robust applications and take advantage of almost all libraries available to the PHP community.
 
@@ -28,13 +28,13 @@ Unlike traditional apache/php-fpm stuff, the memory allocated in Swoole will not
 
 Traditional PHP applications almost always run behind Apache/Nginx, without much control of the request. This brings several limitations:
 
-1. All memory is free'd after request. All PHP code needs be re-compiled on every request. Even with opcache enabled, all opcode still needs to be re-executed.
+1. All memory will be freed after request. All PHP code needs be re-compiled on every request. Even with opcache enabled, all opcode still needs to be re-executed.
 2. It is almost impossible to implement long connections and connections pooling techniques.
 3. Implementing asynchronous tasks requires 3rd party queue servers, such as rabbitmq and beanstalkd.
 4. Implementing realtime applications such as chatting server requires 3rd party languages, nodejs for example.
 
 This why Swoole appeared. Swoole extends the use cases of PHP, and brings all these possibilities to the PHP world. 
-By using Swoole, you can build enhanced web applications with more control, realtime chatting servers, etc more easily.
+By using Swoole, you can build enhanced web applications with more control, real-time chatting servers, etc more easily.
 
 ## Requirements
 
@@ -233,7 +233,7 @@ The `$flag` is a mask to indicate what type of events we should get notified, ca
 
 ### Async IO
 
-Swoole's Async IO provide the ability to read/write file and lookup dns records asynchronously. The following 
+Swoole's Async IO provides the ability to read/write files and lookup dns records asynchronously. The following
 are signatures for these functions:
 
 
@@ -253,7 +253,7 @@ Refer [API Reference](http://wiki.swoole.com/wiki/page/183.html) for more detail
 
 ### Client
 
-Swoole also provides a Client component to build tcp/dup clients in both asynchronous and synchronous ways.
+Swoole also provides a Client component to build tcp/udp clients in both asynchronous and synchronous ways.
 Swoole uses the `swoole_client` class to expose all its functionalities.
 
 synchronous blocking:
