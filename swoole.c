@@ -344,6 +344,7 @@ static zend_function_entry swoole_server_methods[] = {
     PHP_FALIAS(taskwait, swoole_server_taskwait, arginfo_swoole_server_taskwait_oo)
     PHP_FALIAS(finish, swoole_server_finish, arginfo_swoole_server_finish_oo)
     PHP_FALIAS(addlistener, swoole_server_addlisten, arginfo_swoole_server_addlisten_oo)
+    PHP_FALIAS(listen, swoole_server_addlisten, arginfo_swoole_server_addlisten_oo)
     PHP_FALIAS(reload, swoole_server_reload, arginfo_swoole_server_reload_oo)
     PHP_FALIAS(shutdown, swoole_server_shutdown, arginfo_swoole_void)
     PHP_FALIAS(hbcheck, swoole_server_heartbeat, arginfo_swoole_server_heartbeat_oo)
@@ -352,6 +353,9 @@ static zend_function_entry swoole_server_methods[] = {
     PHP_FALIAS(on, swoole_server_on, arginfo_swoole_server_on_oo)
     PHP_FALIAS(connection_info, swoole_connection_info, arginfo_swoole_connection_info_oo)
     PHP_FALIAS(connection_list, swoole_connection_list, arginfo_swoole_connection_list_oo)
+    //psr-0 style
+    PHP_FALIAS(getClientInfo, swoole_connection_info, arginfo_swoole_connection_info_oo)
+    PHP_FALIAS(getClientList, swoole_connection_list, arginfo_swoole_connection_list_oo)
     //timer
     PHP_FALIAS(addtimer, swoole_server_addtimer, arginfo_swoole_server_addtimer_oo)
     PHP_FALIAS(deltimer, swoole_timer_del, arginfo_swoole_timer_del)
@@ -455,7 +459,7 @@ void swoole_set_object(zval *object, void *ptr)
         {
             new_size = SWOOLE_OBJECT_MAX;
         }
-        new_ptr = erealloc(old_ptr, sizeof(void*) * new_size);
+        new_ptr = realloc(old_ptr, sizeof(void*) * new_size);
         if (!new_ptr)
         {
             return;
@@ -487,7 +491,7 @@ void swoole_set_property(zval *object, int property_id, void *ptr)
         if (old_size == 0)
         {
             new_size = 65536;
-            new_ptr = ecalloc(new_size, sizeof(void *));
+            new_ptr = calloc(new_size, sizeof(void *));
         }
         else
         {
@@ -497,7 +501,7 @@ void swoole_set_property(zval *object, int property_id, void *ptr)
                 new_size = SWOOLE_OBJECT_MAX;
             }
             old_ptr = swoole_objects.property[property_id];
-            new_ptr = erealloc(old_ptr, new_size * sizeof(void *));
+            new_ptr = realloc(old_ptr, new_size * sizeof(void *));
         }
         if (new_ptr == NULL)
         {
@@ -574,6 +578,28 @@ PHP_MINIT_FUNCTION(swoole)
 
 #ifdef SW_USE_OPENSSL
     REGISTER_LONG_CONSTANT("SWOOLE_SSL", SW_SOCK_SSL, CONST_CS | CONST_PERSISTENT);
+
+    /**
+     * SSL method
+     */
+    REGISTER_LONG_CONSTANT("SWOOLE_SSLv3_METHOD", SW_SSLv3_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_SSLv3_SERVER_METHOD", SW_SSLv3_SERVER_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_SSLv3_CLIENT_METHOD", SW_SSLv3_CLIENT_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_SSLv23_METHOD", SW_SSLv23_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_SSLv23_SERVER_METHOD", SW_SSLv23_SERVER_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_SSLv23_CLIENT_METHOD", SW_SSLv23_CLIENT_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_TLSv1_METHOD", SW_TLSv1_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_TLSv1_SERVER_METHOD", SW_TLSv1_SERVER_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_TLSv1_CLIENT_METHOD", SW_TLSv1_CLIENT_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_TLSv1_1_METHOD", SW_TLSv1_1_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_TLSv1_1_SERVER_METHOD", SW_TLSv1_1_SERVER_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_TLSv1_1_CLIENT_METHOD", SW_TLSv1_1_CLIENT_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_TLSv1_2_METHOD", SW_TLSv1_2_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_TLSv1_2_SERVER_METHOD", SW_TLSv1_2_SERVER_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_TLSv1_2_CLIENT_METHOD", SW_TLSv1_2_CLIENT_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_DTLSv1_METHOD", SW_DTLSv1_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_DTLSv1_SERVER_METHOD", SW_DTLSv1_SERVER_METHOD, CONST_CS | CONST_PERSISTENT);
+    REGISTER_LONG_CONSTANT("SWOOLE_DTLSv1_CLIENT_METHOD", SW_DTLSv1_CLIENT_METHOD, CONST_CS | CONST_PERSISTENT);
 #endif
 
     REGISTER_LONG_CONSTANT("SWOOLE_EVENT_READ", SW_EVENT_READ, CONST_CS | CONST_PERSISTENT);
@@ -607,6 +633,11 @@ PHP_MINIT_FUNCTION(swoole)
     {
         SwooleG.socket_buffer_size = SWOOLE_G(socket_buffer_size);
     }
+
+#ifdef __MACH__
+    SwooleG.socket_buffer_size = 256 * 1024;
+#endif
+
     if (SWOOLE_G(aio_thread_num) > 0)
     {
         if (SWOOLE_G(aio_thread_num) > SW_AIO_THREAD_NUM_MAX)
@@ -615,6 +646,15 @@ PHP_MINIT_FUNCTION(swoole)
         }
         SwooleAIO.thread_num = SWOOLE_G(aio_thread_num);
     }
+
+    if (strcasecmp("cli", sapi_module.name) == 0)
+    {
+        SWOOLE_G(cli) = 1;
+    }
+
+    swoole_objects.size = 65536;
+    swoole_objects.array = calloc(swoole_objects.size, sizeof(void*));
+
     return SUCCESS;
 }
 /* }}} */
@@ -631,6 +671,17 @@ PHP_MSHUTDOWN_FUNCTION(swoole)
     {
         sw_free(SwooleG.serv);
     }
+
+    int i;
+    for (i = 0; i < SWOOLE_PROPERTY_MAX; i++)
+    {
+        if (swoole_objects.property[i])
+        {
+            free(swoole_objects.property[i]);
+        }
+    }
+    free(swoole_objects.array);
+
     swoole_clean();
     return SUCCESS;
 }
@@ -722,14 +773,6 @@ PHP_RINIT_FUNCTION(swoole)
     }
 #endif
 
-    if (strcasecmp("cli", sapi_module.name) == 0)
-    {
-        SWOOLE_G(cli) = 1;
-    }
-
-    swoole_objects.size = 65536;
-    swoole_objects.array = ecalloc(swoole_objects.size, sizeof(void*));
-
 #ifdef SW_DEBUG_REMOTE_OPEN
     swoole_open_remote_debug();
 #endif
@@ -778,17 +821,6 @@ PHP_RSHUTDOWN_FUNCTION(swoole)
         }
     }
 
-    for(i = 0; i< SWOOLE_PROPERTY_MAX; i ++)
-    {
-        if (swoole_objects.property[i])
-        {
-            efree(swoole_objects.property[i]);
-        }
-    }
-
-    efree(swoole_objects.array);
-    bzero(&swoole_objects, sizeof(swoole_objects));
-
     SwooleWG.reactor_wait_onexit = 0;
 
     return SUCCESS;
@@ -832,11 +864,11 @@ PHP_FUNCTION(swoole_get_mysqli_sock)
     MYSQLI_FETCH_RESOURCE_CONN(mysql, &mysql_link, MYSQLI_STATUS_VALID);
     stream = mysql->mysql->data->net->data->m.get_stream(mysql->mysql->data->net TSRMLS_CC);
 #else
+    MYSQLI_FETCH_RESOURCE_CONN(mysql, &mysql_link, MYSQLI_STATUS_VALID);
     stream = mysql->mysql->data->net->stream;
 #endif
 
-    if (SUCCESS != php_stream_cast(stream, PHP_STREAM_AS_FD_FOR_SELECT | PHP_STREAM_CAST_INTERNAL, (void* )&sock, 1)
-            && sock >= 0)
+    if (SUCCESS != php_stream_cast(stream, PHP_STREAM_AS_FD_FOR_SELECT | PHP_STREAM_CAST_INTERNAL, (void* )&sock, 1) && sock >= 0)
     {
         RETURN_FALSE;
     }
@@ -868,7 +900,9 @@ PHP_FUNCTION(swoole_errno)
 PHP_FUNCTION(swoole_set_process_name)
 {
     zval *name;
-    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "z", &name) == FAILURE)
+    long size = 128;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "z|l", &name, &size) == FAILURE)
     {
         return;
     }
@@ -880,6 +914,11 @@ PHP_FUNCTION(swoole_set_process_name)
     else if (Z_STRLEN_P(name) > 127)
     {
         php_error_docref(NULL TSRMLS_CC, E_WARNING, "process name is too long,the max len is 127");
+    }
+
+    if (size > SwooleG.pagesize)
+    {
+        size = SwooleG.pagesize;
     }
 
 #if PHP_MAJOR_VERSION >= 7 || (PHP_MAJOR_VERSION == 5 && PHP_MINOR_VERSION > 4)
@@ -895,17 +934,15 @@ PHP_FUNCTION(swoole_set_process_name)
     {
         return;
     }
-
     sw_zval_ptr_dtor(&function);
     if (retval)
     {
         sw_zval_ptr_dtor(&retval);
     }
 #else
-    bzero(sapi_module.executable_location, 127);
+    bzero(sapi_module.executable_location, size);
     memcpy(sapi_module.executable_location, Z_STRVAL_P(name), Z_STRLEN_P(name));
 #endif
-
 }
 
 PHP_FUNCTION(swoole_get_local_ip)

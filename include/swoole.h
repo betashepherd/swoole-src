@@ -169,6 +169,7 @@ enum swReturnType
     SW_WAIT     = 2,
     SW_CLOSE    = 3,
     SW_ERROR    = 4,
+    SW_READY    = 5,
 };
 //-------------------------------------------------------------------------------
 enum swFd_type
@@ -184,6 +185,7 @@ enum swFd_type
     SW_FD_AIO             = 9, //linux native aio
     SW_FD_SIGNAL          = 11, //signalfd
     SW_FD_DNS_RESOLVER    = 12, //dns resolver
+    SW_FD_INOTIFY         = 13, //server socket
     SW_FD_USER            = 15, //SW_FD_USER or SW_FD_USER+n: for custom event
 };
 
@@ -379,6 +381,7 @@ typedef struct _swConnection
     uint32_t send_wait :1;
 
     uint32_t direct_send :1;
+    uint32_t ssl_send :1;
 
     uint32_t close_wait :1;
     uint32_t closed :1;
@@ -392,6 +395,9 @@ typedef struct _swConnection
     uint32_t tcp_nodelay :1;
 
     uint32_t http_buffered :1;
+
+    uint32_t ssl_want_read :1;
+    uint32_t ssl_want_write :1;
 
     /**
      * ReactorThread id
@@ -560,9 +566,10 @@ typedef void * (*swThreadStartFunc)(void *);
 typedef int (*swHandle)(swEventData *buf);
 typedef void (*swSignalFunc)(int);
 typedef void* (*swCallback)(void *);
-typedef struct swReactor_s swReactor;
-typedef int (*swReactor_handle)(swReactor *reactor, swEvent *event);
+typedef struct _swReactor swReactor;
 
+typedef int (*swReactor_handle)(swReactor *reactor, swEvent *event);
+typedef void (*swReactor_callback)(swReactor *reactor);
 //------------------Pipe--------------------
 typedef struct _swPipe
 {
@@ -967,7 +974,6 @@ void swoole_fcntl_set_block(int sock, int nonblock);
 
 //----------------------core function---------------------
 int swSocket_set_timeout(int sock, double timeout);
-int swRead(int, void *, int);
 int swWrite(int, void *, int);
 
 static sw_inline int swSocket_is_dgram(uint8_t type)
@@ -1063,7 +1069,13 @@ int swSignalfd_onSignal(swReactor *reactor, swEvent *event);
 #endif
 void swSignal_none(void);
 
-struct swReactor_s
+typedef struct _swReactor_finish_callback
+{
+    struct _swReactor_finish_callback *next, *prev;
+    swReactor_callback callback;
+} swReactor_finish_callback;
+
+struct _swReactor
 {
     void *object;
     void *ptr;  //reserve
@@ -1120,7 +1132,11 @@ struct swReactor_s
     int (*del)(swReactor *, int fd);
     int (*wait)(swReactor *, struct timeval *);
     void (*free)(swReactor *);
+
     int (*setHandle)(swReactor *, int fdtype, swReactor_handle);
+    void (*atLoopEnd)(swReactor *, swReactor_callback);
+
+    swReactor_finish_callback *finish_callback;
 
     void (*onTimeout)(swReactor *);
     void (*onFinish)(swReactor *);
@@ -1234,6 +1250,7 @@ struct _swProcessPool
     void (*onWorkerStop)(struct _swProcessPool *pool, int worker_id);
 
     int (*main_loop)(struct _swProcessPool *pool, swWorker *worker);
+    int (*onWorkerNotFound)(struct _swProcessPool *pool, pid_t pid);
 
     sw_atomic_t round_id;
     sw_atomic_t run_worker_num;

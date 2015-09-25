@@ -662,9 +662,12 @@ static int php_swoole_onTask(swServer *serv, swEventData *req)
         sw_zval_ptr_dtor(&unserialized_zdata);
     }
 
-    if (retval != NULL && SW_Z_TYPE_P(retval) != IS_NULL)
+    if (retval)
     {
-        php_swoole_task_finish(serv, retval TSRMLS_CC);
+        if (SW_Z_TYPE_P(retval) != IS_NULL)
+        {
+            php_swoole_task_finish(serv, retval TSRMLS_CC);
+        }
         sw_zval_ptr_dtor(&retval);
     }
     sw_atomic_fetch_sub(&SwooleStats->tasking_num, 1);
@@ -863,13 +866,6 @@ static void php_swoole_onShutdown(swServer *serv)
             sw_zval_ptr_dtor(&retval);
         }
     }
-#ifdef HAVE_PCRE
-    zval *connection_iterator_object = sw_zend_read_property(swoole_server_class_entry_ptr, zserv, ZEND_STRL("connections"), 0 TSRMLS_CC);
-    if (connection_iterator_object && !ZVAL_IS_NULL(connection_iterator_object))
-    {
-        sw_zval_ptr_dtor(&connection_iterator_object);
-    }
-#endif
 }
 
 static void php_swoole_onWorkerStart(swServer *serv, int worker_id)
@@ -1222,14 +1218,14 @@ PHP_FUNCTION(swoole_server_set)
 
     if (zobject == NULL)
     {
-        if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "Oa", &zobject, swoole_server_class_entry_ptr, &zset) == FAILURE)
+        if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "Oz", &zobject, swoole_server_class_entry_ptr, &zset) == FAILURE)
         {
             return;
         }
     }
     else
     {
-        if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "a", &zset) == FAILURE)
+        if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "z", &zset) == FAILURE)
         {
             return;
         }
@@ -1241,19 +1237,19 @@ PHP_FUNCTION(swoole_server_set)
     if (sw_zend_hash_find(vht, ZEND_STRS("chroot"), (void **) &v) == SUCCESS)
     {
         convert_to_string(v);
-        SwooleG.chroot = sw_strndup(v, 256);
+        SwooleG.chroot = strndup(Z_STRVAL_P(v), Z_STRLEN_P(v));
     }
     //user
     if (sw_zend_hash_find(vht, ZEND_STRS("user"), (void **) &v) == SUCCESS)
     {
         convert_to_string(v);
-        SwooleG.user = sw_strndup(v, 128);
+        SwooleG.user = strndup(Z_STRVAL_P(v), Z_STRLEN_P(v));
     }
     //group
     if (sw_zend_hash_find(vht, ZEND_STRS("group"), (void **) &v) == SUCCESS)
     {
         convert_to_string(v);
-        SwooleG.group = sw_strndup(v, 128);
+        SwooleG.group = strndup(Z_STRVAL_P(v), Z_STRLEN_P(v));
     }
     //daemonize
     if (sw_zend_hash_find(vht, ZEND_STRS("daemonize"), (void **) &v) == SUCCESS)
@@ -1266,6 +1262,12 @@ PHP_FUNCTION(swoole_server_set)
     {
         convert_to_long(v);
         serv->backlog = (int) Z_LVAL_P(v);
+    }
+    //watch_path
+    if (sw_zend_hash_find(vht, ZEND_STRS("watch_path"), (void **) &v) == SUCCESS)
+    {
+        convert_to_string(v);
+        serv->watch_path = strndup(Z_STRVAL_P(v), Z_STRLEN_P(v));
     }
     //reactor thread num
     if (sw_zend_hash_find(vht, ZEND_STRS("reactor_num"), (void **) &v) == SUCCESS)
@@ -1404,6 +1406,12 @@ PHP_FUNCTION(swoole_server_set)
         convert_to_long(v);
         serv->tcp_defer_accept = (uint8_t) Z_LVAL_P(v);
     }
+    //port reuse
+    if (sw_zend_hash_find(vht, ZEND_STRS("enable_port_reuse"), (void **) &v) == SUCCESS)
+    {
+        convert_to_boolean(v);
+        SwooleG.reuse_port = Z_BVAL_P(v);
+    }
     //tcp_keepalive
     if (sw_zend_hash_find(vht, ZEND_STRS("open_tcp_keepalive"), (void **) &v) == SUCCESS)
     {
@@ -1418,8 +1426,7 @@ PHP_FUNCTION(swoole_server_set)
         serv->open_eof_check = 1;
     }
     //package eof
-    if (sw_zend_hash_find(vht, ZEND_STRS("package_eof"), (void **) &v) == SUCCESS
-            || sw_zend_hash_find(vht, ZEND_STRS("data_eof"), (void **) &v) == SUCCESS)
+    if (sw_zend_hash_find(vht, ZEND_STRS("package_eof"), (void **) &v) == SUCCESS)
     {
         convert_to_string(v);
         serv->protocol.package_eof_len = Z_STRLEN_P(v);
@@ -1664,6 +1671,11 @@ PHP_FUNCTION(swoole_server_set)
             return;
         }
     }
+    if (sw_zend_hash_find(vht, ZEND_STRS("ssl_method"), (void **) &v) == SUCCESS)
+    {
+        convert_to_long(v);
+        serv->ssl_method = (int) Z_LVAL_P(v);
+    }
     if (serv->open_ssl && !serv->ssl_key_file)
     {
         php_error_docref(NULL TSRMLS_CC, E_ERROR, "ssl require key file.");
@@ -1883,7 +1895,6 @@ PHP_METHOD(swoole_server, addprocess)
     worker->ptr = process;
 
     int id = swServer_add_worker(serv, worker);
-
     if (id < 0)
     {
         php_error_docref(NULL TSRMLS_CC, E_WARNING, "swServer_add_worker failed.");
@@ -2190,9 +2201,21 @@ PHP_FUNCTION(swoole_server_sendfile)
     //check fd
     if (conn_fd <= 0 || conn_fd > SW_MAX_SOCKET_ID)
     {
-        php_error_docref(NULL TSRMLS_CC, E_WARNING, "invalid fd[%ld] error.", conn_fd);
+        swoole_php_error(E_WARNING, "invalid fd[%ld] error.", conn_fd);
         RETURN_FALSE;
     }
+
+    swServer *serv = swoole_get_object(zobject);
+
+#ifdef SW_USE_OPENSSL
+    swConnection *conn = swServer_connection_verify(serv, (int) conn_fd);
+    if (conn && conn->ssl)
+    {
+        swoole_php_error(E_WARNING, "SSL client#%d cannot use sendfile().", (int) conn_fd);
+        RETURN_FALSE;
+    }
+#endif
+
     send_data.info.len = len;
     //file name size
     if (send_data.info.len > SW_BUFFER_SIZE - 1)
@@ -2207,7 +2230,6 @@ PHP_FUNCTION(swoole_server_sendfile)
         RETURN_FALSE;
     }
 
-    swServer *serv = swoole_get_object(zobject);
 
     send_data.info.fd = (int) conn_fd;
     send_data.info.type = SW_EVENT_SENDFILE;
@@ -3223,6 +3245,12 @@ PHP_METHOD(swoole_connection_iterator, valid)
 
         if (conn->active && !conn->closed)
         {
+#ifdef SW_USE_OPENSSL
+            if (conn->ssl && conn->ssl_state != SW_SSL_STATE_READY)
+            {
+                continue;
+            }
+#endif
             server_itearator.session_id = conn->session_id;
             server_itearator.current_fd = fd;
             server_itearator.index++;

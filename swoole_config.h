@@ -16,9 +16,11 @@
 #ifndef SWOOLE_CONFIG_H_
 #define SWOOLE_CONFIG_H_
 
+#ifndef __clang__
 //gcc version check
 #if defined(__GNUC__) && (__GNUC__ < 3 || (__GNUC__ == 4 && __GNUC_MINOR__ < 4))
 #error "GCC 4.4 or later required."
+#endif
 #endif
 
 #define SW_MAX_FDTYPE              32   //32 kinds of event
@@ -35,11 +37,8 @@
 #define SW_DEBUG_SERVER_PORT       9999
 
 #define SW_SOCKET_OVERFLOW_WAIT    100
-#if __MACH__
-#define SW_SOCKET_BUFFER_SIZE      (256*1024)
-#else
+#define SW_SOCKET_MAX_DEFAULT      65536
 #define SW_SOCKET_BUFFER_SIZE      (8*1024*1024)
-#endif
 
 #define SW_GLOBAL_MEMORY_PAGESIZE  (1024*1024*2) //全局内存的分页
 
@@ -158,6 +157,9 @@
 #define SW_RINGBUFFER_FREE_N_MAX         4     //when free_n > MAX, execute collect
 #define SW_RINGBUFFER_WARNING            100
 //#define SW_RINGBUFFER_DEBUG
+
+#define SW_RELOAD_AFTER_SECONDS_N        10
+#define SW_RELOAD_FILE_EXTNAME           ".php"
 
 /**
  * ringbuffer memory pool size

@@ -380,6 +380,9 @@ struct _swServer
     
     uint8_t listen_port_num;
 
+    char *watch_path;
+    time_t reload_time;
+
     /**
      * 来自客户端的心跳侦测包
      */
@@ -408,6 +411,8 @@ struct _swServer
     uint8_t open_ssl;
     char *ssl_cert_file;
     char *ssl_key_file;
+    SSL_CTX *ssl_context;
+    uint8_t ssl_method;
 #endif
 
     void *ptr2;
@@ -559,6 +564,10 @@ int swServer_get_manager_pid(swServer *serv);
 int swServer_worker_init(swServer *serv, swWorker *worker);
 void swServer_onTimer(swTimer *timer, swTimer_node *event);
 void swServer_enable_accept(swReactor *reactor);
+
+#ifdef HAVE_INOTIFY
+int swServer_watch_file(swServer *serv, swReactor *reactor);
+#endif
 
 void swTaskWorker_init(swProcessPool *pool);
 int swTaskWorker_onTask(swProcessPool *pool, swEventData *task);
@@ -743,7 +752,27 @@ static sw_inline swConnection *swServer_connection_verify(swServer *serv, int se
     {
         return NULL;
     }
+#ifdef SW_USE_OPENSSL
+    if (conn->ssl && conn->ssl_state != SW_SSL_STATE_READY)
+    {
+        swWarn("SSL not ready");
+        return NULL;
+    }
+#endif
     return conn;
+}
+
+static sw_inline void swServer_connection_ready(swServer *serv, int fd, int reactor_id)
+{
+    swDataHead connect_event;
+    connect_event.type = SW_EVENT_CONNECT;
+    connect_event.from_id = reactor_id;
+    connect_event.fd = fd;
+
+    if (serv->factory.notify(&serv->factory, &connect_event) < 0)
+    {
+        swWarn("send notification [fd=%d] failed.", fd);
+    }
 }
 
 void swWorker_free(swWorker *worker);
@@ -772,6 +801,8 @@ int swReactorProcess_start(swServer *serv);
 int swReactorProcess_onClose(swReactor *reactor, swEvent *event);
 
 int swManager_start(swFactory *factory);
+pid_t swManager_spawn_user_worker(swServer *serv, swWorker* worker);
+int swManager_wait_user_worker(swProcessPool *pool, pid_t pid);
 
 #ifdef __cplusplus
 }

@@ -54,6 +54,7 @@ static int client_onError(swReactor *reactor, swEvent *event);
 
 static void client_check_setting(swClient *cli, zval *zset TSRMLS_DC);
 static int client_error_callback(zval *zobject, swEvent *event, int error TSRMLS_DC);
+static int client_connect_callback(zval *zobject TSRMLS_DC);
 static swClient* client_create_socket(zval *object, char *host, int host_len, int port);
 
 static const zend_function_entry swoole_client_methods[] =
@@ -74,7 +75,7 @@ static const zend_function_entry swoole_client_methods[] =
     PHP_FE_END
 };
 
-HashTable php_sw_long_connections;
+static swHashMap *php_sw_long_connections;
 
 zend_class_entry swoole_client_ce;
 zend_class_entry *swoole_client_class_entry_ptr;
@@ -87,7 +88,7 @@ void swoole_client_init(int module_number TSRMLS_DC)
     zend_declare_property_long(swoole_client_class_entry_ptr, SW_STRL("errCode")-1, 0, ZEND_ACC_PUBLIC TSRMLS_CC);
     zend_declare_property_long(swoole_client_class_entry_ptr, SW_STRL("sock")-1, 0, ZEND_ACC_PUBLIC TSRMLS_CC);
 
-    zend_hash_init(&php_sw_long_connections, 16, NULL, ZVAL_PTR_DTOR, 1);
+    php_sw_long_connections = swHashMap_new(SW_HASHMAP_INIT_BUCKET_N, NULL);
 }
 
 /**
@@ -114,11 +115,12 @@ static int client_close(zval *zobject, int fd TSRMLS_DC)
     }
     else if (Z_LVAL_P(ztype) & SW_FLAG_KEEP)
     {
-        if (sw_zend_hash_del(&php_sw_long_connections, cli->server_str, cli->server_strlen) == SUCCESS)
+        if (swHashMap_del(php_sw_long_connections, cli->server_str, cli->server_strlen))
         {
             swoole_php_fatal_error(E_WARNING, "delete from hashtable failed.");
         }
         sw_free(cli->server_str);
+        pefree(cli, 1);
         ZVAL_LONG(ztype, 0);
     }
     else
@@ -229,6 +231,24 @@ static int client_onRead(swReactor *reactor, swEvent *event)
         return SW_ERR;
     }
 
+#ifdef SW_USE_OPENSSL
+    if (cli->open_ssl && cli->socket->ssl_state == SW_SSL_STATE_WAIT_STREAM)
+    {
+        if (swClient_ssl_handshake(cli) < 0)
+        {
+            return client_close(zobject, event->fd TSRMLS_CC);
+        }
+        if (cli->socket->ssl_state == SW_SSL_STATE_READY)
+        {
+            return client_connect_callback(zobject TSRMLS_CC);
+        }
+        else
+        {
+            return SW_OK;
+        }
+    }
+#endif
+
     if (cli->open_eof_check || cli->open_length_check)
     {
         swConnection *conn = cli->socket;
@@ -266,7 +286,7 @@ static int client_onRead(swReactor *reactor, swEvent *event)
     else if (cli->packet_mode == 1)
     {
         uint32_t len_tmp = 0;
-        n = recv(event->fd, &len_tmp, 4, 0);
+        n = swConnection_recv(event->socket, &len_tmp, 4, 0);
         if (n <= 0)
         {
             return client_close(zobject, event->fd TSRMLS_CC);
@@ -283,7 +303,7 @@ static int client_onRead(swReactor *reactor, swEvent *event)
     recv_again:
 #endif
 
-    n = recv(event->fd, buf, buf_len, 0);
+    n = swConnection_recv(event->socket, buf, buf_len, 0);
     if (n < 0)
     {
         switch (swConnection_error(errno))
@@ -521,6 +541,13 @@ static void client_check_setting(swClient *cli, zval *zset TSRMLS_DC)
             swSysError("setsockopt(%d, TCP_NODELAY) failed.", cli->socket->fd);
         }
     }
+#ifdef SW_USE_OPENSSL
+    if (sw_zend_hash_find(vht, ZEND_STRS("ssl_method"), (void **) &v) == SUCCESS)
+    {
+        convert_to_long(v);
+        cli->ssl_method = (int) Z_LVAL_P(v);
+    }
+#endif
 }
 
 static int client_onWrite(swReactor *reactor, swEvent *event)
@@ -544,13 +571,8 @@ static int client_onWrite(swReactor *reactor, swEvent *event)
     }
     else
     {
-        zval *zcallback = NULL;
-        zval **args[1];
-        zval *retval = NULL;
         int error;
         socklen_t len = sizeof(error);
-
-        args[0] = &zobject;
 
         if (getsockopt (event->fd, SOL_SOCKET, SO_ERROR, &error, &len) < 0)
         {
@@ -560,38 +582,57 @@ static int client_onWrite(swReactor *reactor, swEvent *event)
         //success
         if (error == 0)
         {
+            //listen read event
             SwooleG.main_reactor->set(SwooleG.main_reactor, event->fd, (SW_FD_USER + 1) | SW_EVENT_READ);
-
             //connected
             cli->socket->active = 1;
-            client_callback *cb = swoole_get_property(zobject, 0);
-            zcallback = cb->onConnect;
-            if (zcallback == NULL || ZVAL_IS_NULL(zcallback))
+
+#ifdef SW_USE_OPENSSL
+            if (cli->open_ssl)
             {
-                swoole_php_fatal_error(E_WARNING, "object have not connect callback.");
-                return SW_ERR;
+                if (swClient_ssl_handshake(cli) < 0)
+                {
+                    return client_error_callback(zobject, event, error TSRMLS_CC);
+                }
+                cli->socket->ssl_state = SW_SSL_STATE_WAIT_STREAM;
+                return SW_OK;
             }
-            if (sw_call_user_function_ex(EG(function_table), NULL, zcallback, &retval, 1, args, 0, NULL TSRMLS_CC) == FAILURE)
-            {
-                swoole_php_fatal_error(E_WARNING, "onConnect handler error");
-                return SW_ERR;
-            }
-            if (EG(exception))
-            {
-                zend_exception_error(EG(exception), E_ERROR TSRMLS_CC);
-            }
-            if (retval)
-            {
-                sw_zval_ptr_dtor(&retval);
-            }
+#endif
+            client_connect_callback(zobject TSRMLS_CC);
         }
         else
         {
-            client_error_callback(zobject, event, error TSRMLS_CC);
-            event->socket->removed = 1;
+            return client_error_callback(zobject, event, error TSRMLS_CC);
         }
     }
+    return SW_OK;
+}
 
+static int client_connect_callback(zval *zobject TSRMLS_DC)
+{
+    zval *retval = NULL;
+    client_callback *cb = swoole_get_property(zobject, 0);
+    zval *zcallback = cb->onConnect;
+    zval **args[1];
+    if (zcallback == NULL || ZVAL_IS_NULL(zcallback))
+    {
+        swoole_php_fatal_error(E_WARNING, "object have not connect callback.");
+        return SW_ERR;
+    }
+    args[0] = &zobject;
+    if (sw_call_user_function_ex(EG(function_table), NULL, zcallback, &retval, 1, args, 0, NULL TSRMLS_CC) == FAILURE)
+    {
+        swoole_php_fatal_error(E_WARNING, "onConnect handler error");
+        return SW_ERR;
+    }
+    if (EG(exception))
+    {
+        zend_exception_error(EG(exception), E_ERROR TSRMLS_CC);
+    }
+    if (retval)
+    {
+        sw_zval_ptr_dtor(&retval);
+    }
     return SW_OK;
 }
 
@@ -606,13 +647,11 @@ static int client_error_callback(zval *zobject, swEvent *event, int error TSRMLS
         swClient *cli = swoole_get_object(zobject);
         if (cli)
         {
-            swoole_php_sys_error(E_WARNING, "connect to server [%s] failed.", cli->server_str);
+            swoole_php_error(E_WARNING, "connect to server [%s] failed. Error: %s [%d].", cli->server_str, strerror(error), error);
         }
     }
-    if (event->socket->active)
-    {
-        SwooleG.main_reactor->del(SwooleG.main_reactor, event->fd);
-    }
+
+    SwooleG.main_reactor->del(SwooleG.main_reactor, event->fd);
 
     client_callback *cb = swoole_get_property(zobject, 0);
     zcallback = cb->onError;
@@ -808,12 +847,11 @@ static swClient* client_create_socket(zval *object, char *host, int host_len, in
     //keep the tcp connection
     if (type & SW_FLAG_KEEP)
     {
-        swClient *find;
-
-        if (sw_zend_hash_find(&php_sw_long_connections, conn_key, conn_key_len, (void **) &find) == FAILURE)
+        swClient *find = swHashMap_find(php_sw_long_connections, conn_key, conn_key_len);
+        if (find == NULL)
         {
             cli = (swClient*) pemalloc(sizeof(swClient), 1);
-            if (sw_zend_hash_update(&php_sw_long_connections, conn_key, conn_key_len, (void*)cli, sizeof(cli), NULL) == FAILURE)
+            if (swHashMap_add(php_sw_long_connections, conn_key, conn_key_len, cli, NULL) == FAILURE)
             {
                 swoole_php_fatal_error(E_WARNING, "swoole_client_create_socket add to hashtable failed.");
             }
@@ -842,6 +880,18 @@ static swClient* client_create_socket(zval *object, char *host, int host_len, in
             zend_update_property_long(swoole_client_class_entry_ptr, object, ZEND_STRL("errCode"), errno TSRMLS_CC);
             return NULL;
         }
+
+#ifdef SW_USE_OPENSSL
+        //ssl/tls
+        if (type & SW_SOCK_SSL)
+        {
+            if (swClient_enable_ssl_encrypt(cli) < 0)
+            {
+                return NULL;
+            }
+        }
+#endif
+
         //don't forget free it
         cli->server_str = strdup(conn_key);
         cli->server_strlen = conn_key_len;
@@ -897,7 +947,8 @@ static PHP_METHOD(swoole_client, __construct)
     {
         zend_update_property_null(swoole_client_class_entry_ptr, getThis(), ZEND_STRL("id") TSRMLS_CC);
     }
-
+    //init
+    swoole_set_object(getThis(), NULL);
     RETURN_TRUE;
 }
 
@@ -950,7 +1001,18 @@ static PHP_METHOD(swoole_client, connect)
         RETURN_FALSE;
     }
 
+    cli = swoole_get_object(getThis());
+    if (cli)
+    {
+        swoole_php_fatal_error(E_WARNING, "Operation now in progress.");
+        RETURN_FALSE;
+    }
+
     cli = client_create_socket(getThis(), host, host_len, port);
+    if (cli == NULL)
+    {
+        RETURN_FALSE;
+    }
 
     if (cli->type == SW_SOCK_TCP || cli->type == SW_SOCK_TCP6)
     {
@@ -1550,6 +1612,12 @@ static PHP_METHOD(swoole_client, close)
 {
     zval *ztype;
     int ret = 1;
+    zend_bool force = 0;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "|b", &force) == FAILURE)
+    {
+        return;
+    }
 
     swClient *cli = swoole_get_object(getThis());
     if (!cli)
@@ -1573,15 +1641,16 @@ static PHP_METHOD(swoole_client, close)
 
     //Connection error, or short tcp connection.
     //No keep connection
-    if (!(Z_LVAL_P(ztype) & SW_FLAG_KEEP) || swConnection_error(SwooleG.error) == SW_CLOSE)
+    if (force || !(Z_LVAL_P(ztype) & SW_FLAG_KEEP) || swConnection_error(SwooleG.error) == SW_CLOSE)
     {
         if (cli->async == 1 && SwooleG.main_reactor != NULL)
         {
             ret = client_close(getThis(), cli->socket->fd TSRMLS_CC);
         }
-        else if (cli->socket->fd != 0)
+        else
         {
-            ret = cli->close(cli);
+            client_free(getThis(), cli);
+            ret = 1;
         }
     }
     SW_CHECK_RETURN(ret);

@@ -526,7 +526,7 @@ static int http_request_on_header_value(php_http_parser *parser, const char *at,
         zval *header = client->request.zheader;
         sw_add_assoc_stringl_ex(header, header_name, client->current_header_name_len + 1, (char *) at, length, 1);
     }
-    else if ((parser->method == PHP_HTTP_POST || parser->method == PHP_HTTP_PUT || parser->method == PHP_HTTP_PATCH)
+    else if ((parser->method == PHP_HTTP_POST || parser->method == PHP_HTTP_PUT || parser->method == PHP_HTTP_DELETE || parser->method == PHP_HTTP_PATCH)
             && memcmp(header_name, ZEND_STRL("content-type")) == 0
             && strncasecmp(at, ZEND_STRL("application/x-www-form-urlencoded")) == 0)
     {
@@ -820,30 +820,28 @@ static int http_request_on_body(php_http_parser *parser, const char *at, size_t 
 #endif
 
     swoole_http_client *client = parser->data;
-    char *body = estrndup(at, length);
+    char *body;
+
+    client->request.post_length = length;
 
     if (SwooleG.serv->http_parse_post && client->request.post_form_urlencoded)
     {
         zval *post;
         SW_MAKE_STD_ZVAL(post);
         array_init(post);
+
+        body = estrndup(at, length);
         zend_update_property(swoole_http_request_class_entry_ptr, client->request.zrequest_object, ZEND_STRL("post"), post TSRMLS_CC);
         sapi_module.treat_data(PARSE_STRING, body, post TSRMLS_CC);
         http_merge_php_global(post, client->request.zrequest_object, HTTP_GLOBAL_POST);
     }
-    else
-    {
-        client->request.post_content = body;
-        client->request.post_length = length;
-    }
-
-    if (client->mt_parser != NULL)
+    else if (client->mt_parser != NULL)
     {
         multipart_parser *multipart_parser = client->mt_parser;
-        size_t n = multipart_parser_execute(multipart_parser, body, length);
+        size_t n = multipart_parser_execute(multipart_parser, at, length);
         if (n != length)
         {
-            swoole_php_fatal_error(E_ERROR, "fail to parse multipart body");
+            swoole_php_fatal_error(E_WARNING, "parse multipart body failed.");
         }
     }
 
@@ -954,11 +952,11 @@ static int http_onReceive(swServer *serv, swEventData *req)
     swTrace("httpRequest %d bytes:\n---------------------------------------\n%s\n", Z_STRLEN_P(zdata), Z_STRVAL_P(zdata));
 
     long n = php_http_parser_execute(parser, &http_parser_settings, Z_STRVAL_P(zdata), Z_STRLEN_P(zdata));
-    sw_zval_ptr_dtor(&zdata);
-
     if (n < 0)
     {
+        sw_zval_ptr_dtor(&zdata);
         swWarn("php_http_parser_execute failed.");
+
         if (conn->websocket_status == WEBSOCKET_STATUS_CONNECTION)
         {
             return SwooleG.serv->factory.end(&SwooleG.serv->factory, fd);
@@ -969,6 +967,7 @@ static int http_onReceive(swServer *serv, swEventData *req)
         zval *retval;
         zval **args[2];
         zval *zreques_object = client->request.zrequest_object;
+        client->request.zdata = zdata;
 
         char *method_name = http_get_method_name(parser->method);
 
@@ -980,6 +979,7 @@ static int http_onReceive(swServer *serv, swEventData *req)
         swConnection *conn = swWorker_get_connection(SwooleG.serv, fd);
         if (!conn)
         {
+            sw_zval_ptr_dtor(&zdata);
             swWarn("connection[%d] is closed.", fd);
             return SW_ERR;
         }
@@ -1038,6 +1038,12 @@ static int http_onReceive(swServer *serv, swEventData *req)
         else
         {
             callback = HTTP_CALLBACK_onRequest;
+            //no have onRequest callback
+            if (php_sw_http_server_callbacks[callback] == NULL)
+            {
+                swoole_websocket_onReuqest(client);
+                return SW_OK;
+            }
         }
 
         if (sw_call_user_function_ex(EG(function_table), NULL, php_sw_http_server_callbacks[callback], &retval, 2, args, 0, NULL TSRMLS_CC) == FAILURE)
@@ -1248,6 +1254,11 @@ void swoole_http_request_free(swoole_http_client *client TSRMLS_DC)
         sw_zval_ptr_dtor(&client->response.zresponse_object);
         client->response.zresponse_object = NULL;
     }
+    //request data
+    if (req->zdata)
+    {
+        sw_zval_ptr_dtor(&req->zdata);
+    }
 
     client->end = 1;
     client->send_header = 0;
@@ -1434,17 +1445,18 @@ static PHP_METHOD(swoole_http_request, rawcontent)
         RETURN_FALSE;
     }
 
-    if (!client->request.post_content)
+    if (client->request.post_content)
+    {
+        SW_RETVAL_STRINGL(client->request.post_content, client->request.post_length, 1);
+    }
+    else if (client->request.post_length > 0)
+    {
+        SW_RETVAL_STRINGL(Z_STRVAL_P(client->request.zdata) + Z_STRLEN_P(client->request.zdata) - client->request.post_length, client->request.post_length, 1);
+    }
+    else
     {
         RETURN_FALSE;
     }
-
-#if PHP_MAJOR_VERSION >= 7
-    SW_RETVAL_STRINGL(client->request.post_content, client->request.post_length, 1);
-#else
-    SW_RETVAL_STRINGL(client->request.post_content, client->request.post_length, 0);
-    client->request.post_content = NULL;
-#endif
 }
 
 static PHP_METHOD(swoole_http_response, write)

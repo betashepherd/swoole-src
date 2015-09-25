@@ -1,4 +1,3 @@
-dnl $Id$
 dnl config.m4 for extension swoole
 
 dnl  +----------------------------------------------------------------------+
@@ -14,15 +13,6 @@ dnl  | license@swoole.com so we can mail you a copy immediately.            |
 dnl  +----------------------------------------------------------------------+
 dnl  | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
 dnl  +----------------------------------------------------------------------+
-
-
-dnl Comments in this file start with the string 'dnl'.
-dnl Remove where necessary. This file will not work
-dnl without editing.
-
-dnl If your extension references something external, use with:
-
-dnl Otherwise use enable:
 
 PHP_ARG_ENABLE(swoole-debug, whether to enable swoole debug,
 [  --enable-swoole-debug   Enable swoole debug], no, no)
@@ -179,6 +169,8 @@ if test "$PHP_SWOOLE" != "no"; then
     AC_CHECK_LIB(c, kqueue, AC_DEFINE(HAVE_KQUEUE, 1, [have kqueue]))
     AC_CHECK_LIB(c, daemon, AC_DEFINE(HAVE_DAEMON, 1, [have daemon]))
     AC_CHECK_LIB(c, mkostemp, AC_DEFINE(HAVE_MKOSTEMP, 1, [have mkostemp]))
+    AC_CHECK_LIB(c, inotify_init, AC_DEFINE(HAVE_INOTIFY, 1, [have inotify]))
+    AC_CHECK_LIB(c, inotify_init1, AC_DEFINE(HAVE_INOTIFY_INIT1, 1, [have inotify_init1]))
     AC_CHECK_LIB(pthread, pthread_rwlock_init, AC_DEFINE(HAVE_RWLOCK, 1, [have pthread_rwlock_init]))
     AC_CHECK_LIB(pthread, pthread_spin_lock, AC_DEFINE(HAVE_SPINLOCK, 1, [have pthread_spin_lock]))
 	AC_CHECK_LIB(pthread, pthread_mutex_timedlock, AC_DEFINE(HAVE_MUTEX_TIMEDLOCK, 1, [have pthread_mutex_timedlock]))
@@ -276,12 +268,10 @@ if test "$PHP_SWOOLE" != "no"; then
         src/protocol/Http.c \
         src/protocol/WebSocket.c \
         src/protocol/Mqtt.c \
-        src/protocol/Base64.c"
-        
-    if test "$enable_swoole" != "yes"; then
-        swoole_source_file="$swoole_source_file thirdparty/php_http_parser.c"
-        swoole_source_file="$swoole_source_file thirdparty/multipart_parser.c"
-    fi
+        src/protocol/Base64.c"        
+
+    swoole_source_file="$swoole_source_file thirdparty/php_http_parser.c"
+    swoole_source_file="$swoole_source_file thirdparty/multipart_parser.c"
 
     PHP_NEW_EXTENSION(swoole, $swoole_source_file, $ext_shared)
     

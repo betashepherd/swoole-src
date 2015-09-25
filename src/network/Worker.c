@@ -153,9 +153,12 @@ int swWorker_onTask(swFactory *factory, swEventData *task)
         {
             break;
         }
-        do_task: serv->onReceive(serv, task);
-        SwooleWG.request_count++;
-        sw_atomic_fetch_add(&SwooleStats->request_count, 1);
+        do_task:
+        {
+            serv->onReceive(serv, task);
+            SwooleWG.request_count++;
+            sw_atomic_fetch_add(&SwooleStats->request_count, 1);
+        }
         if (task->info.type == SW_EVENT_PACKAGE_END)
         {
             package->length = 0;
