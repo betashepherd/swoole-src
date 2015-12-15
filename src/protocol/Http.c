@@ -111,17 +111,18 @@ int swHttpRequest_get_protocol(swHttpRequest *request)
     return SW_OK;
 }
 
-void swHttpRequest_free(swConnection *conn, swHttpRequest *request)
+void swHttpRequest_free(swConnection *conn)
 {
-    if (conn->http_buffered && request->buffer)
-    {
-        swTrace("RequestShutdown. free buffer=%p, request=%p\n", request->buffer, request);
-        swString_free(request->buffer);
-        conn->http_buffered = 0;
-    }
+    swHttpRequest *request = conn->object;
     if (request)
     {
+        if (request->buffer)
+        {
+            swString_free(request->buffer);
+        }
         bzero(request, sizeof(swHttpRequest));
+        sw_free(request);
+        conn->object = NULL;
     }
 }
 

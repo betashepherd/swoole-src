@@ -220,7 +220,6 @@ struct _swServer
      * worker process num
      */
     uint16_t worker_num;
-
     /**
      * The number of pipe per reactor maintenance
      */
@@ -380,7 +379,6 @@ struct _swServer
     
     uint8_t listen_port_num;
 
-    char *watch_path;
     time_t reload_time;
 
     /**
@@ -413,6 +411,8 @@ struct _swServer
     char *ssl_key_file;
     SSL_CTX *ssl_context;
     uint8_t ssl_method;
+    char *ssl_client_cert_file;
+    uint8_t ssl_verify_depth;
 #endif
 
     void *ptr2;
@@ -422,8 +422,10 @@ struct _swServer
 
     swListenPort *listen_list;
 
+    uint16_t user_worker_num;
     swUserWorker_node *user_worker_list;
     swHashMap *user_worker_map;
+    swWorker **user_workers;
 
     swReactorThread *reactor_threads;
     swWorker *workers;
@@ -458,7 +460,7 @@ struct _swServer
     void (*onPipeMessage)(swServer *, swEventData *);
     void (*onWorkerStart)(swServer *serv, int worker_id);
     void (*onWorkerStop)(swServer *serv, int worker_id);
-    void (*onWorkerError)(swServer *serv, int worker_id, pid_t worker_pid, int exit_code); //Only process mode
+    void (*onWorkerError)(swServer *serv, int worker_id, pid_t worker_pid, int exit_code, int signo);
     void (*onUserWorkerStart)(swServer *serv, swWorker *worker);
     int (*onTask)(swServer *serv, swEventData *data);
     int (*onFinish)(swServer *serv, swEventData *data);
@@ -508,6 +510,7 @@ int swServer_shutdown(swServer *serv);
 int swServer_udp_send(swServer *serv, swSendData *resp);
 int swServer_tcp_send(swServer *serv, int fd, void *data, uint32_t length);
 int swServer_tcp_sendwait(swServer *serv, int fd, void *data, uint32_t length);
+int swServer_tcp_sendfile(swServer *serv, int fd, char *filename, uint32_t len);
 
 //UDP, UDP必然超过0x1000000
 //原因：IPv4的第4字节最小为1,而这里的conn_fd是网络字节序
@@ -561,6 +564,7 @@ swPipe * swServer_pipe_get(swServer *serv, int pipe_fd);
 void swServer_pipe_set(swServer *serv, swPipe *p);
 
 int swServer_get_manager_pid(swServer *serv);
+int swServer_get_socket(swServer *serv, int port);
 int swServer_worker_init(swServer *serv, swWorker *worker);
 void swServer_onTimer(swTimer *timer, swTimer_node *event);
 void swServer_enable_accept(swReactor *reactor);
@@ -638,20 +642,29 @@ static sw_inline int swServer_get_fd(swServer *serv, uint32_t session_id)
 
 static sw_inline swWorker* swServer_get_worker(swServer *serv, uint16_t worker_id)
 {
-    int task_num = SwooleG.task_worker_max > 0 ? SwooleG.task_worker_max : SwooleG.task_worker_num;
-    if (worker_id > serv->worker_num + task_num)
-    {
-        swWarn("worker_id is exceed serv->worker_num + SwooleG.task_worker_num");
-        return NULL;
-    }
-    else if (worker_id >= serv->worker_num)
-    {
-        return &(SwooleGS->task_workers.workers[worker_id - serv->worker_num]);
-    }
-    else
+    //Event Worker
+    if (worker_id < serv->worker_num)
     {
         return &(SwooleGS->event_workers.workers[worker_id]);
     }
+
+    //Task Worker
+    uint16_t task_worker_max = SwooleG.task_worker_num + serv->worker_num;
+    if (worker_id < task_worker_max)
+    {
+        return &(SwooleGS->task_workers.workers[worker_id - serv->worker_num]);
+    }
+
+    //User Worker
+    uint16_t user_worker_max = task_worker_max + serv->user_worker_num;
+    if (worker_id < user_worker_max)
+    {
+        return serv->user_workers[worker_id - task_worker_max];
+    }
+
+    //Unkown worker_id
+    swWarn("worker#%d is not exist.", worker_id);
+    return NULL;
 }
 
 static sw_inline uint32_t swServer_worker_schedule(swServer *serv, uint32_t schedule_key)
@@ -737,6 +750,19 @@ static sw_inline swConnection *swWorker_get_connection(swServer *serv, int sessi
     int real_fd = swServer_get_fd(serv, session_id);
     swConnection *conn = swServer_connection_get(serv, real_fd);
     return conn;
+}
+
+static sw_inline swString *swWorker_get_buffer(swServer *serv, int worker_id)
+{
+    //input buffer
+    if (serv->factory_mode != SW_MODE_PROCESS)
+    {
+        return SwooleWG.buffer_input[0];
+    }
+    else
+    {
+        return SwooleWG.buffer_input[worker_id];
+    }
 }
 
 static sw_inline swConnection *swServer_connection_verify(swServer *serv, int session_id)

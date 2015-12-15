@@ -24,6 +24,7 @@
 #include <ext/standard/php_math.h>
 #include <ext/date/php_date.h>
 #include <ext/standard/md5.h>
+#include <main/rfc1867.h>
 
 #include <main/php_variables.h>
 
@@ -139,6 +140,7 @@ static PHP_METHOD(swoole_http_request, rawcontent);
 
 static PHP_METHOD(swoole_http_response, write);
 static PHP_METHOD(swoole_http_response, end);
+static PHP_METHOD(swoole_http_response, sendfile);
 static PHP_METHOD(swoole_http_response, cookie);
 static PHP_METHOD(swoole_http_response, rawcookie);
 static PHP_METHOD(swoole_http_response, header);
@@ -259,6 +261,7 @@ const zend_function_entry swoole_http_response_methods[] =
     PHP_ME(swoole_http_response, header, NULL, ZEND_ACC_PUBLIC)
     PHP_ME(swoole_http_response, write, NULL, ZEND_ACC_PUBLIC)
     PHP_ME(swoole_http_response, end, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(swoole_http_response, sendfile, NULL, ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 
@@ -297,30 +300,23 @@ static void http_global_merge(zval *val, zval *zrequest, int type)
         char _php_key[128];
         int keytype;
         uint32_t keylen;
-        ulong idx;
         zval *value;
 
-        zval *server = sw_zend_read_property(swoole_http_request_class_entry_ptr, zrequest, ZEND_STRL("server"), 1 TSRMLS_CC);
-        if (server || !ZVAL_IS_NULL(server))
-        {
-            SW_HASHTABLE_FOREACH_START(Z_ARRVAL_P(server), value)
-                keytype = sw_zend_hash_get_current_key(Z_ARRVAL_P(server), &key, &keylen, &idx);
-                if (HASH_KEY_IS_STRING != keytype)
-                {
-                    continue;
-                }
-                strncpy(_php_key, key, sizeof(_php_key));
-                php_strtoupper(_php_key, keylen);
-                convert_to_string(value);
-                sw_add_assoc_stringl_ex(php_global_server, _php_key, keylen, Z_STRVAL_P(value), Z_STRLEN_P(value), 1);
-            SW_HASHTABLE_FOREACH_END();
-        }
+        SW_HASHTABLE_FOREACH_START2(Z_ARRVAL_P(val), key, keylen, keytype, value)
+            if (HASH_KEY_IS_STRING != keytype)
+            {
+                continue;
+            }
+            strncpy(_php_key, key, sizeof(_php_key));
+            php_strtoupper(_php_key, keylen);
+            convert_to_string(value);
+            sw_add_assoc_stringl_ex(php_global_server, _php_key, keylen + 1, Z_STRVAL_P(value), Z_STRLEN_P(value), 1);
+        SW_HASHTABLE_FOREACH_END();
 
         zval *header = sw_zend_read_property(swoole_http_request_class_entry_ptr, zrequest, ZEND_STRL("header"), 1 TSRMLS_CC);
         if (header || !ZVAL_IS_NULL(header))
         {
-            SW_HASHTABLE_FOREACH_START(Z_ARRVAL_P(header), value)
-                keytype = sw_zend_hash_get_current_key(Z_ARRVAL_P(header), &key, &keylen, &idx);
+            SW_HASHTABLE_FOREACH_START2(Z_ARRVAL_P(header), key, keylen, keytype, value)
                 if (HASH_KEY_IS_STRING != keytype)
                 {
                     continue;
@@ -334,10 +330,10 @@ static void http_global_merge(zval *val, zval *zrequest, int type)
                         key[i] = '_';
                     }
                 }
-                keylen = snprintf(_php_key, sizeof(_php_key), "HTTP_%s", key) + 1;
+                keylen = snprintf(_php_key, sizeof(_php_key), "HTTP_%s", key);
                 php_strtoupper(_php_key, keylen);
                 convert_to_string(value);
-                sw_add_assoc_stringl_ex(php_global_server, _php_key, keylen, Z_STRVAL_P(value), Z_STRLEN_P(value), 1);
+                sw_add_assoc_stringl_ex(php_global_server, _php_key, keylen + 1, Z_STRVAL_P(value), Z_STRLEN_P(value), 1);
              SW_HASHTABLE_FOREACH_END();
         }
         ZEND_SET_SYMBOL(&EG(symbol_table), "_SERVER", php_global_server);
@@ -435,7 +431,7 @@ static int http_request_on_header_field(php_http_parser *parser, const char *at,
 static void http_parse_cookie(zval *array, const char *at, size_t length)
 {
     char keybuf[SW_HTTP_COOKIE_KEYLEN];
-    char *value;
+    char valbuf[SW_HTTP_COOKIE_VALLEN];
     char *_c = (char *) at;
 
     int klen = 0;
@@ -457,9 +453,9 @@ static void http_parse_cookie(zval *array, const char *at, size_t length)
         else if (state == 1 && *_c == ';')
         {
             vlen = i - j;
-            value = estrndup((char * ) at + j, vlen);
-            vlen = php_url_decode(value, vlen);
-            sw_add_assoc_stringl_ex(array, keybuf, klen, value, vlen, 1);
+            strncpy(valbuf, (char * ) at + j, SW_HTTP_COOKIE_VALLEN);
+            vlen = php_url_decode(valbuf, vlen);
+            sw_add_assoc_stringl_ex(array, keybuf, klen, valbuf, vlen, 1);
             j = i + 2;
             state = 0;
         }
@@ -470,9 +466,9 @@ static void http_parse_cookie(zval *array, const char *at, size_t length)
     {
         vlen = i - j;
         keybuf[klen - 1] = 0;
-        value = estrndup((char * ) at + j, vlen);
-        vlen = php_url_decode(value, vlen);
-        sw_add_assoc_stringl_ex(array, keybuf, klen, value, vlen, 1);
+        strncpy(valbuf, (char * ) at + j, SW_HTTP_COOKIE_VALLEN);
+        vlen = php_url_decode(valbuf, vlen);
+        sw_add_assoc_stringl_ex(array, keybuf, klen, valbuf, vlen, 1);
     }
 }
 
@@ -767,7 +763,7 @@ static int multipart_body_on_data_end(multipart_parser* p)
             zend_update_property(swoole_http_request_class_entry_ptr, client->request.zrequest_object, ZEND_STRL("post"), zpost TSRMLS_CC);
         }
 
-       sw_add_assoc_stringl_ex(zpost, client->current_form_data_name, client->current_form_data_name_len + 1,
+        sw_add_assoc_stringl_ex(zpost, client->current_form_data_name, client->current_form_data_name_len + 1,
                 swoole_http_form_data_buffer->str, swoole_http_form_data_buffer->length, 1);
 
         efree(client->current_form_data_name);
@@ -807,9 +803,32 @@ static int multipart_body_on_data_end(multipart_parser* p)
 
 static int multipart_body_end(multipart_parser* p)
 {
+#if PHP_MAJOR_VERSION < 7
+    TSRMLS_FETCH_FROM_CTX(sw_thread_ctx ? sw_thread_ctx : NULL);
+#endif
+
     swoole_http_client *client = (swoole_http_client *) p->data;
     zval *files = client->request.zfiles;
+    zval *value;
+
     http_merge_php_global(files, client->request.zrequest_object, HTTP_GLOBAL_FILES);
+
+    SW_HASHTABLE_FOREACH_START(Z_ARRVAL_P(client->request.zfiles), value)
+    {
+        zval *file_path;
+        if (sw_zend_hash_find(Z_ARRVAL_P(value), ZEND_STRS("tmp_name"), (void **) &file_path) == SUCCESS)
+        {
+#if PHP_MAJOR_VERSION >= 7
+            zend_string *tmp_name = zval_get_string(file_path);
+            zend_hash_add_ptr(SG(rfc1867_uploaded_files), tmp_name, tmp_name);
+#else
+            char *temp_filename = Z_STRVAL_P(file_path);
+            sw_zend_hash_add(SG(rfc1867_uploaded_files), temp_filename, Z_STRLEN_P(file_path) + 1, &temp_filename, sizeof(char *), NULL);
+#endif
+        }
+    }
+    SW_HASHTABLE_FOREACH_END();
+
     return 0;
 }
 
@@ -826,14 +845,14 @@ static int http_request_on_body(php_http_parser *parser, const char *at, size_t 
 
     if (SwooleG.serv->http_parse_post && client->request.post_form_urlencoded)
     {
-        zval *post;
-        SW_MAKE_STD_ZVAL(post);
-        array_init(post);
+        zval *zpost;
+        http_alloc_zval(client, request, zpost);
+        array_init(zpost);
 
         body = estrndup(at, length);
-        zend_update_property(swoole_http_request_class_entry_ptr, client->request.zrequest_object, ZEND_STRL("post"), post TSRMLS_CC);
-        sapi_module.treat_data(PARSE_STRING, body, post TSRMLS_CC);
-        http_merge_php_global(post, client->request.zrequest_object, HTTP_GLOBAL_POST);
+        zend_update_property(swoole_http_request_class_entry_ptr, client->request.zrequest_object, ZEND_STRL("post"), zpost TSRMLS_CC);
+        sapi_module.treat_data(PARSE_STRING, body, zpost TSRMLS_CC);
+        http_merge_php_global(zpost, client->request.zrequest_object, HTTP_GLOBAL_POST);
     }
     else if (client->mt_parser != NULL)
     {
@@ -974,7 +993,7 @@ static int http_onReceive(swServer *serv, swEventData *req)
         sw_add_assoc_string(zserver, "request_method", method_name, 1);
         sw_add_assoc_stringl(zserver, "request_uri", client->request.path, client->request.path_len, 1);
         sw_add_assoc_stringl(zserver, "path_info", client->request.path, client->request.path_len, 1);
-        add_assoc_long_ex(zserver, ZEND_STRS("request_time"), SwooleGS->now);
+        sw_add_assoc_long_ex(zserver, ZEND_STRS("request_time"), SwooleGS->now);
 
         swConnection *conn = swWorker_get_connection(SwooleG.serv, fd);
         if (!conn)
@@ -999,7 +1018,7 @@ static int http_onReceive(swServer *serv, swEventData *req)
 
         sw_add_assoc_string(zserver, "server_software", SW_HTTP_SERVER_SOFTWARE, 1);
 
-        http_merge_php_global(NULL, zreques_object, HTTP_GLOBAL_SERVER);
+        http_merge_php_global(zserver, zreques_object, HTTP_GLOBAL_SERVER);
         http_merge_php_global(NULL, zreques_object, HTTP_GLOBAL_REQUEST);
 
         //websocket handshake
@@ -1195,6 +1214,11 @@ void swoole_http_request_free(swoole_http_client *client TSRMLS_DC)
     {
         sw_zval_ptr_dtor(&req->zcookie);
     }
+    //request data
+    if (req->zdata)
+    {
+        sw_zval_ptr_dtor(&req->zdata);
+    }
     //upload files
     if (req->zfiles)
     {
@@ -1204,20 +1228,19 @@ void swoole_http_request_free(swoole_http_client *client TSRMLS_DC)
         int keytype;
         uint32_t keylen;
 
-        SW_HASHTABLE_FOREACH_START(Z_ARRVAL_P(zfiles), value)
+        SW_HASHTABLE_FOREACH_START2(Z_ARRVAL_P(zfiles), key, keylen, keytype, value)
         {
-            keytype = sw_zend_hash_get_current_key(Z_ARRVAL_P(zfiles), &key, &keylen, 0);
-
             if (HASH_KEY_IS_STRING != keytype)
             {
                 continue;
             }
             zval *file_path;
-            if (sw_zend_hash_find(Z_ARRVAL_P(value), ZEND_STRS("tmp_name"), (void **) &file_path)
-                    == SUCCESS)
+            if (sw_zend_hash_find(Z_ARRVAL_P(value), ZEND_STRS("tmp_name"), (void **) &file_path) == SUCCESS)
             {
                 unlink(Z_STRVAL_P(file_path));
-            } sw_zval_ptr_dtor(&value);
+                sw_zend_hash_del(SG(rfc1867_uploaded_files), Z_STRVAL_P(file_path), Z_STRLEN_P(file_path) + 1);
+            }
+            sw_zval_ptr_dtor(&value);
         }
         SW_HASHTABLE_FOREACH_END();
 
@@ -1254,11 +1277,6 @@ void swoole_http_request_free(swoole_http_client *client TSRMLS_DC)
         sw_zval_ptr_dtor(&client->response.zresponse_object);
         client->response.zresponse_object = NULL;
     }
-    //request data
-    if (req->zdata)
-    {
-        sw_zval_ptr_dtor(&req->zdata);
-    }
 
     client->end = 1;
     client->send_header = 0;
@@ -1275,10 +1293,22 @@ static char *http_status_message(int code)
         return "101 Switching Protocols";
     case 201:
         return "201 Created";
+    case 202:
+        return "202 Accepted";
+    case 203:
+        return "203 Non-Authoritative Information";
     case 204:
         return "204 No Content";
+    case 205:
+        return "205 Reset Content";
     case 206:
         return "206 Partial Content";
+    case 207:
+        return "207 Multi-Status";
+    case 208:
+        return "208 Already Reported";
+    case 226:
+        return "226 IM Used";
     case 300:
         return "300 Multiple Choices";
     case 301:
@@ -1289,12 +1319,16 @@ static char *http_status_message(int code)
         return "303 See Other";
     case 304:
         return "304 Not Modified";
+    case 305:
+        return "305 Use Proxy";
     case 307:
         return "307 Temporary Redirect";
     case 400:
         return "400 Bad Request";
     case 401:
         return "401 Unauthorized";
+    case 402:
+        return "402 Payment Required";
     case 403:
         return "403 Forbidden";
     case 404:
@@ -1303,10 +1337,18 @@ static char *http_status_message(int code)
         return "405 Method Not Allowed";
     case 406:
         return "406 Not Acceptable";
+    case 407:
+        return "407 Proxy Authentication Required";
     case 408:
         return "408 Request Timeout";
+    case 409:
+        return "409 Conflict";
     case 410:
         return "410 Gone";
+    case 411:
+        return "411 Length Required";
+    case 412:
+        return "412 Precondition Failed";
     case 413:
         return "413 Request Entity Too Large";
     case 414:
@@ -1317,14 +1359,42 @@ static char *http_status_message(int code)
         return "416 Requested Range Not Satisfiable";
     case 417:
         return "417 Expectation Failed";
+    case 418:
+        return "418 I'm a teapot";
+    case 421:
+        return "421 Misdirected Request";
+    case 422:
+        return "422 Unprocessable Entity";
+    case 423:
+        return "423 Locked";
+    case 424:
+        return "424 Failed Dependency";
+    case 426:
+        return "426 Upgrade Required";
+    case 428:
+        return "428 Precondition Required";
+    case 429:
+        return "429 Too Many Requests";
+    case 431:
+        return "431 Request Header Fields Too Large";
     case 500:
         return "500 Internal Server Error";
     case 501:
         return "501 Method Not Implemented";
     case 503:
         return "503 Service Unavailable";
+    case 505:
+        return "505 HTTP Version Not Supported";
     case 506:
         return "506 Variant Also Negotiates";
+    case 507:
+        return "507 Insufficient Storage";
+    case 508:
+        return "508 Loop Detected";
+    case 510:
+        return "510 Not Extended";
+    case 511:
+        return "511 Network Authentication Required";
     case 200:
     default:
         return "200 OK";
@@ -1413,6 +1483,10 @@ static PHP_METHOD(swoole_http_server, start)
     serv->open_length_check = 0;
 
     serv->ptr2 = getThis();
+
+    //for is_uploaded_file and move_uploaded_file
+    ALLOC_HASHTABLE(SG(rfc1867_uploaded_files));
+    zend_hash_init(SG(rfc1867_uploaded_files), 8, NULL, NULL, 0);
 
     ret = swServer_create(serv);
     if (ret < 0)
@@ -1877,6 +1951,84 @@ static PHP_METHOD(swoole_http_response, end)
 
     swoole_http_request_free(client TSRMLS_CC);
 
+    if (!client->keepalive)
+    {
+        SwooleG.serv->factory.end(&SwooleG.serv->factory, client->fd);
+    }
+    if (http_merge_global_flag > 0)
+    {
+        http_global_clear(TSRMLS_C);
+    }
+    RETURN_TRUE;
+}
+
+static PHP_METHOD(swoole_http_response, sendfile)
+{
+    char *filename;
+    int filename_length;
+    int ret;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &filename, &filename_length) == FAILURE)
+    {
+        return;
+    }
+
+    if (filename_length <= 0)
+    {
+        swoole_php_error(E_WARNING, "file name is empty.");
+        RETURN_FALSE;
+    }
+
+    swoole_http_client *client = http_get_client(getThis(), 1 TSRMLS_CC);
+    if (!client)
+    {
+        RETURN_FALSE;
+    }
+
+    if (client->chunk)
+    {
+        swoole_php_error(E_WARNING, "cannot use HTTP-Chunk.");
+        RETURN_FALSE;
+    }
+
+    int file_fd = open(filename, O_RDONLY);
+    if (file_fd < 0)
+    {
+        swoole_php_sys_error(E_WARNING, "open(%s) failed.", filename);
+        RETURN_FALSE;
+    }
+
+    struct stat file_stat;
+    if (fstat(file_fd, &file_stat) < 0)
+    {
+        swoole_php_sys_error(E_WARNING, "fstat(%s) failed.", filename);
+        RETURN_FALSE;
+    }
+
+    if (file_stat.st_size <= 0)
+    {
+        swoole_php_error(E_WARNING, "file is empty.");
+        RETURN_FALSE;
+    }
+
+    swString_clear(swoole_http_buffer);
+    http_build_header(client, getThis(), swoole_http_buffer, file_stat.st_size TSRMLS_CC);
+
+    ret = swServer_tcp_send(SwooleG.serv, client->fd, swoole_http_buffer->str, swoole_http_buffer->length);
+    if (ret < 0)
+    {
+        client->send_header = 0;
+        RETURN_FALSE;
+    }
+
+    ret = swServer_tcp_sendfile(SwooleG.serv, client->fd, filename, filename_length);
+    if (ret < 0)
+    {
+        client->send_header = 0;
+        RETURN_FALSE;
+    }
+
+    swoole_http_request_free(client TSRMLS_CC);
     if (!client->keepalive)
     {
         SwooleG.serv->factory.end(&SwooleG.serv->factory, client->fd);

@@ -19,15 +19,15 @@
 
 static int swClient_inet_addr(swClient *cli, char *host, int port);
 static int swClient_tcp_connect(swClient *cli, char *host, int port, double _timeout, int udp_connect);
-static int swClient_tcp_send_sync(swClient *cli, char *data, int length);
-static int swClient_tcp_send_async(swClient *cli, char *data, int length);
+
+static int swClient_tcp_send_sync(swClient *cli, char *data, int length, int flags);
+static int swClient_tcp_send_async(swClient *cli, char *data, int length, int flags);
+static int swClient_udp_send(swClient *cli, char *data, int length, int flags);
+
 static int swClient_tcp_sendfile_sync(swClient *cli, char *filename);
 static int swClient_tcp_sendfile_async(swClient *cli, char *filename);
-static int swClient_tcp_recv_no_buffer(swClient *cli, char *data, int len, int waitall);
-//static int swClient_tcp_recv_eof_check(swClient *cli, char *data, int len, int waitall);
-//static int swClient_tcp_recv_length_check(swClient *cli, char *data, int len, int waitall);
+static int swClient_tcp_recv_no_buffer(swClient *cli, char *data, int len, int flags);
 static int swClient_udp_connect(swClient *cli, char *host, int port, double _timeout, int udp_connect);
-static int swClient_udp_send(swClient *cli, char *data, int length);
 static int swClient_udp_recv(swClient *cli, char *data, int len, int waitall);
 static int swClient_close(swClient *cli);
 static swHashMap *swoole_dns_cache = NULL;
@@ -136,12 +136,11 @@ int swClient_create(swClient *cli, int type, int async)
 #ifdef SW_USE_OPENSSL
 int swClient_enable_ssl_encrypt(swClient *cli)
 {
-    cli->ssl_context = swSSL_get_client_context(cli->ssl_method);
+    cli->ssl_context = swSSL_get_context(cli->ssl_method, cli->ssl_cert_file, cli->ssl_key_file);
     if (cli->ssl_context == NULL)
     {
         return SW_ERR;
     }
-    cli->open_ssl = 1;
     cli->socket->ssl_send = 1;
     return SW_OK;
 }
@@ -253,7 +252,15 @@ static int swClient_close(swClient *cli)
         {
             swSSL_close(cli->socket);
         }
-        swSSL_free(cli->ssl_context);
+        swSSL_free_context(cli->ssl_context);
+        if (cli->ssl_cert_file)
+        {
+            free(cli->ssl_cert_file);
+        }
+        if (cli->ssl_key_file)
+        {
+            free(cli->ssl_key_file);
+        }
     }
 #endif
 
@@ -327,7 +334,7 @@ static int swClient_tcp_connect(swClient *cli, char *host, int port, double time
     return ret;
 }
 
-static int swClient_tcp_send_async(swClient *cli, char *data, int length)
+static int swClient_tcp_send_async(swClient *cli, char *data, int length, int flags)
 {
     if (SwooleG.main_reactor->write(SwooleG.main_reactor, cli->socket->fd, data, length) < 0)
     {
@@ -339,7 +346,7 @@ static int swClient_tcp_send_async(swClient *cli, char *data, int length)
     }
 }
 
-static int swClient_tcp_send_sync(swClient *cli, char *data, int length)
+static int swClient_tcp_send_sync(swClient *cli, char *data, int length, int flags)
 {
     int written = 0;
     int n;
@@ -349,7 +356,7 @@ static int swClient_tcp_send_sync(swClient *cli, char *data, int length)
 
     while (written < length)
     {
-        n = swConnection_send(cli->socket, data, length - written, 0);
+        n = swConnection_send(cli->socket, data, length - written, flags);
         if (n < 0)
         {
             if (errno == EINTR)
@@ -392,22 +399,15 @@ static int swClient_tcp_sendfile_async(swClient *cli, char *filename)
     return SW_OK;
 }
 
-static int swClient_tcp_recv_no_buffer(swClient *cli, char *data, int len, int waitall)
+static int swClient_tcp_recv_no_buffer(swClient *cli, char *data, int len, int flag)
 {
-    int flag = 0, ret;
-    if (waitall == 1)
-    {
-        flag = MSG_WAITALL;
-    }
-
 #ifdef SW_CLIENT_SOCKET_WAIT
     if (cli->socket->socket_wait)
     {
         swSocket_wait(cli->socket->fd, cli->timeout_ms, SW_EVENT_READ);
     }
 #endif
-
-    ret = swConnection_recv(cli->socket, data, len, flag);
+    int ret = swConnection_recv(cli->socket, data, len, flag);
     if (ret < 0)
     {
         if (errno == EINTR)
@@ -419,7 +419,6 @@ static int swClient_tcp_recv_no_buffer(swClient *cli, char *data, int len, int w
             return SW_ERR;
         }
     }
-
     return ret;
 }
 
@@ -476,7 +475,7 @@ static int swClient_udp_connect(swClient *cli, char *host, int port, double time
     }
 }
 
-static int swClient_udp_send(swClient *cli, char *data, int len)
+static int swClient_udp_send(swClient *cli, char *data, int len, int flags)
 {
     int n;
     n = sendto(cli->socket->fd, data, len, 0, (struct sockaddr *) &cli->server_addr.addr, cli->server_addr.len);
@@ -490,21 +489,15 @@ static int swClient_udp_send(swClient *cli, char *data, int len)
     }
 }
 
-static int swClient_udp_recv(swClient *cli, char *data, int length, int waitall)
+static int swClient_udp_recv(swClient *cli, char *data, int length, int flags)
 {
-    int flag = 0, ret;
-
-    if (waitall == 1)
-    {
-        flag = MSG_WAITALL;
-    }
     cli->remote_addr.len = sizeof(cli->remote_addr.addr);
-    ret = recvfrom(cli->socket->fd, data, length, flag, (struct sockaddr *) &cli->remote_addr.addr, &cli->remote_addr.len);
+    int ret = recvfrom(cli->socket->fd, data, length, flags, (struct sockaddr *) &cli->remote_addr.addr, &cli->remote_addr.len);
     if (ret < 0)
     {
         if (errno == EINTR)
         {
-            ret = recvfrom(cli->socket->fd, data, length, flag, (struct sockaddr *) &cli->remote_addr, &cli->remote_addr.len);
+            ret = recvfrom(cli->socket->fd, data, length, flags, (struct sockaddr *) &cli->remote_addr, &cli->remote_addr.len);
         }
         else
         {

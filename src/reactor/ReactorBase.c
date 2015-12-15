@@ -198,6 +198,18 @@ static void swReactor_onTimeout_and_Finish(swReactor *reactor)
     {
         cb->callback(reactor);
     }
+    //client exit
+    if (SwooleG.serv == NULL && SwooleG.timer.num <= 0)
+    {
+        if (reactor->event_num == 1 && SwooleAIO.task_num == 1)
+        {
+            reactor->running = 0;
+        }
+        else if (reactor->event_num == 0)
+        {
+            reactor->running = 0;
+        }
+    }
 }
 
 static void swReactor_onTimeout(swReactor *reactor)
@@ -213,18 +225,6 @@ static void swReactor_onTimeout(swReactor *reactor)
 
 static void swReactor_onFinish(swReactor *reactor)
 {
-    //client exit
-    if (SwooleG.serv == NULL && SwooleG.timer.num <= 0)
-    {
-        if (reactor->event_num == 1 && SwooleAIO.task_num == 1)
-        {
-            reactor->running = 0;
-        }
-        else if (reactor->event_num == 0)
-        {
-            reactor->running = 0;
-        }
-    }
     //check signal
     if (reactor->singal_no)
     {
@@ -248,13 +248,6 @@ int swReactor_close(swReactor *reactor, int fd)
         swBuffer_free(socket->in_buffer);
         socket->in_buffer = NULL;
     }
-
-#ifdef SW_USE_OPENSSL
-    if (socket->ssl)
-    {
-        swSSL_close(socket);
-    }
-#endif
 
     bzero(socket, sizeof(swConnection));
     return close(fd);

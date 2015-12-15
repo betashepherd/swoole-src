@@ -193,6 +193,9 @@ static int swReactorProcess_onPipeRead(swReactor *reactor, swEvent *event)
         case SW_EVENT_PIPE_MESSAGE:
             serv->onPipeMessage(serv, &task);
             break;
+        case SW_EVENT_FINISH:
+            serv->onFinish(serv, &task);
+            break;
         case SW_EVENT_SENDFILE:
             memcpy(&_send.info, &task.info, sizeof(_send.info));
             _send.data = task.data;
@@ -236,7 +239,7 @@ static int swReactorProcess_loop(swProcessPool *pool, swWorker *worker)
 
     swServer_worker_init(serv, worker);
 
-    SwooleWG.buffer_output = sw_malloc(sizeof(swString*) * serv->reactor_num);
+    SwooleWG.buffer_output = sw_malloc(sizeof(swString*) * serv->worker_num);
     if (SwooleWG.buffer_output == NULL)
     {
         swError("malloc for SwooleWG.buffer_output failed.");
@@ -244,7 +247,7 @@ static int swReactorProcess_loop(swProcessPool *pool, swWorker *worker)
     }
 
     int i;
-    for (i = 0; i < serv->reactor_num; i++)
+    for (i = 0; i < serv->worker_num; i++)
     {
         SwooleWG.buffer_output[i] = swString_new(SW_BUFFER_SIZE_BIG);
         if (SwooleWG.buffer_output[i] == NULL)
@@ -268,11 +271,6 @@ static int swReactorProcess_loop(swProcessPool *pool, swWorker *worker)
     LL_FOREACH(serv->listen_list, ls)
     {
         fdtype = swSocket_is_dgram(ls->type) ? SW_FD_UDP : SW_FD_LISTEN;
-
-        serv->connection_list[ls->sock].fd = ls->sock;
-        serv->connection_list[ls->sock].socket_type = ls->type;
-        serv->connection_list[ls->sock].fdtype = fdtype;
-
         if (fdtype == SW_FD_UDP)
         {
             if (swServer_listen(serv, ls) < 0)
@@ -280,6 +278,10 @@ static int swReactorProcess_loop(swProcessPool *pool, swWorker *worker)
                 continue;
             }
         }
+
+        serv->connection_list[ls->sock].fd = ls->sock;
+        serv->connection_list[ls->sock].socket_type = ls->type;
+        serv->connection_list[ls->sock].fdtype = fdtype;
 
 #ifdef HAVE_REUSEPORT
         if (fdtype == SW_FD_LISTEN && SwooleG.reuse_port)

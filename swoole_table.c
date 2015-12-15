@@ -135,7 +135,7 @@ static void php_swoole_table_row2array(swTable *table, swTableRow *row, zval *re
         else if (col->type == SW_TABLE_FLOAT)
         {
             memcpy(&dval, row->data + col->index, sizeof(dval));
-            add_assoc_double_ex(return_value, col->name->str, col->name->length + 1, dval);
+            sw_add_assoc_double_ex(return_value, col->name->str, col->name->length + 1, dval);
         }
         else
         {
@@ -143,19 +143,19 @@ static void php_swoole_table_row2array(swTable *table, swTableRow *row, zval *re
             {
             case SW_TABLE_INT8:
                 memcpy(&lval, row->data + col->index, 1);
-                add_assoc_long_ex(return_value, col->name->str, col->name->length + 1, (int8_t) lval);
+                sw_add_assoc_long_ex(return_value, col->name->str, col->name->length + 1, (int8_t) lval);
                 break;
             case SW_TABLE_INT16:
                 memcpy(&lval, row->data + col->index, 2);
-                add_assoc_long_ex(return_value, col->name->str, col->name->length + 1, (int16_t) lval);
+                sw_add_assoc_long_ex(return_value, col->name->str, col->name->length + 1, (int16_t) lval);
                 break;
             case SW_TABLE_INT32:
                 memcpy(&lval, row->data + col->index, 4);
-                add_assoc_long_ex(return_value, col->name->str, col->name->length + 1, (int32_t) lval);
+                sw_add_assoc_long_ex(return_value, col->name->str, col->name->length + 1, (int32_t) lval);
                 break;
             default:
                 memcpy(&lval, row->data + col->index, 8);
-                add_assoc_long_ex(return_value, col->name->str, col->name->length + 1, lval);
+                sw_add_assoc_long_ex(return_value, col->name->str, col->name->length + 1, lval);
                 break;
             }
         }
@@ -204,9 +204,9 @@ PHP_METHOD(swoole_table, column)
     char *name;
     zend_size_t len;
     long type;
-    long size;
+    long size = 0;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s|ll", &name, &len, &type, &size) == FAILURE)
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sl|l", &name, &len, &type, &size) == FAILURE)
     {
         RETURN_FALSE;
     }
@@ -214,6 +214,11 @@ PHP_METHOD(swoole_table, column)
     {
         php_error_docref(NULL TSRMLS_CC, E_WARNING, "string length must be more than 0.");
         RETURN_FALSE;
+    }
+    //default int32
+    if (type == SW_TABLE_INT && size < 1)
+    {
+        size = 4;
     }
     swTable *table = swoole_get_object(getThis());
     swTableColumn_add(table, name, len, type, size);

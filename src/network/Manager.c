@@ -73,10 +73,8 @@ int swManager_start(swFactory *factory)
             create_pipe = 0;
         }
 
-        //启动min个.此时的pool->worker_num相当于max
-        int task_num = SwooleG.task_worker_max > 0 ? SwooleG.task_worker_max : SwooleG.task_worker_num;
 
-        if (swProcessPool_create(&SwooleGS->task_workers, task_num, SwooleG.task_max_request, key, create_pipe) < 0)
+        if (swProcessPool_create(&SwooleGS->task_workers, SwooleG.task_worker_num, SwooleG.task_max_request, key, create_pipe) < 0)
         {
             swWarn("[Master] create task_workers failed.");
             return SW_ERR;
@@ -85,9 +83,8 @@ int swManager_start(swFactory *factory)
         swProcessPool *pool = &SwooleGS->task_workers;
         swTaskWorker_init(pool);
 
-        int i;
         swWorker *worker;
-        for (i = 0; i < task_num; i++)
+        for (i = 0; i < SwooleG.task_worker_num; i++)
         {
             worker = &pool->workers[i];
             if (swWorker_create(worker) < 0)
@@ -98,6 +95,22 @@ int swManager_start(swFactory *factory)
             {
                 swServer_pipe_set(SwooleG.serv, worker->pipe_object);
             }
+        }
+    }
+
+    //User Worker Process
+    if (serv->user_worker_num > 0)
+    {
+        serv->user_workers = sw_calloc(serv->user_worker_num, sizeof(swWorker *));
+        swUserWorker_node *user_worker;
+        i = 0;
+        LL_FOREACH(serv->user_worker_list, user_worker)
+        {
+            if (swWorker_create(user_worker->worker) < 0)
+            {
+                return SW_ERR;
+            }
+            serv->user_workers[i++] = user_worker->worker;
         }
     }
 
@@ -184,7 +197,7 @@ static void swManager_check_exit_status(swServer *serv, int worker_id, pid_t pid
 
         if (serv->onWorkerError != NULL)
         {
-            serv->onWorkerError(serv, worker_id, pid, WEXITSTATUS(status));
+            serv->onWorkerError(serv, worker_id, pid, WEXITSTATUS(status), WTERMSIG(status));
         }
     }
 }
@@ -226,12 +239,7 @@ static int swManager_loop(swFactory *factory)
     swSignal_add(SIGUSR2, swManager_signal_handle);
     //swSignal_add(SIGINT, swManager_signal_handle);
 
-    //for add/recycle task process
-    if (SwooleG.task_worker_max > 0)
-    {
-        swSignal_add(SIGALRM, swManager_signal_handle);
-        alarm(1);
-    }
+    SwooleG.main_reactor = NULL;
 
     while (SwooleG.running > 0)
     {
@@ -442,65 +450,10 @@ static pid_t swManager_spawn_worker(swFactory *factory, int worker_id)
 
 static void swManager_signal_handle(int sig)
 {
-    swProcessPool *pool = &(SwooleGS->task_workers);
-    swWorker *worker = NULL;
-    int i = 0, ret, over_load_num = 0, zero_load_num = 0;
-
     switch (sig)
     {
     case SIGTERM:
         SwooleG.running = 0;
-        break;
-    case SIGALRM:
-        worker = &(pool->workers[pool->run_worker_num]);
-        if (worker->deleted == 1 && worker->tasking_num == 0)
-        {
-            ret = kill(worker->pid, SIGTERM);
-            if (ret < 0)
-            {
-                swWarn("[Manager]kill fail.pid=%d. Error: %s [%d]", worker->pid, strerror(errno), errno);
-            }
-            alarm(1);
-            break;
-        }
-
-        for (i = 0; i < pool->run_worker_num; i++)
-        {
-            worker = &(pool->workers[i]);
-
-            if (worker->tasking_num >= 1)  //todo support config
-            {
-                over_load_num++;
-            }
-            else  // == 0
-            {
-                zero_load_num++;
-            }
-        }
-
-        if (over_load_num > pool->run_worker_num / 2 && pool->run_worker_num < SwooleG.task_worker_max)
-        {
-            if (swProcessPool_spawn(&(pool->workers[pool->run_worker_num])) < 0)
-            {
-                swWarn("swProcessPool_spawn fail");
-            }
-            else
-            {
-                pool->run_worker_num++;
-            }
-        }
-        else if (zero_load_num >= SwooleG.task_worker_num && pool->run_worker_num > SwooleG.task_worker_num)
-        {
-            SwooleG.task_recycle_num++;
-            if (SwooleG.task_recycle_num > 3)
-            {
-                pool->run_worker_num--;
-                worker = &(pool->workers[pool->run_worker_num]);
-                worker->deleted = 1;
-                SwooleG.task_recycle_num = 0;
-            }
-        }
-        alarm(1);
         break;
         /**
          * reload all workers

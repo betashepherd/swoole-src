@@ -22,7 +22,6 @@ typedef zend_rsrc_list_entry zend_resource;
 #define SW_RETURN_STRING                      RETURN_STRING
 #define SW_Z_ARRVAL_P                         Z_ARRVAL_P
 #define IS_TRUE                               1
-#define sw_add_assoc_string                   add_assoc_string
 
 static inline int sw_zend_hash_find(HashTable *ht, char *k, int len, void **v)
 {
@@ -56,8 +55,14 @@ static inline int sw_zend_hash_find(HashTable *ht, char *k, int len, void **v)
 #define sw_zend_hash_add                      zend_hash_add
 #define sw_zend_hash_index_update             zend_hash_index_update
 #define sw_call_user_function_ex              call_user_function_ex
+
+//----------------------------------Array API------------------------------------
+#define sw_add_assoc_string                   add_assoc_string
 #define sw_add_assoc_stringl_ex               add_assoc_stringl_ex
 #define sw_add_assoc_stringl                  add_assoc_stringl
+#define sw_add_assoc_double_ex                add_assoc_double_ex
+#define sw_add_assoc_long_ex                  add_assoc_long_ex
+
 #define sw_zval_ptr_dtor                      zval_ptr_dtor
 #define sw_zend_hash_copy                     zend_hash_copy
 #define sw_zval_add_ref                       zval_add_ref
@@ -126,10 +131,9 @@ inline int SW_Z_TYPE_P(zval *z);
 #else
 #define sw_php_var_serialize                php_var_serialize
 typedef size_t zend_size_t;
-#define SW_RETVAL_STRINGL(s, l,dup)         RETVAL_STRINGL(s,l)
-#define ZEND_SET_SYMBOL(ht,str,arr) zend_hash_str_update(ht, str, sizeof(str)-1, arr);
+#define ZEND_SET_SYMBOL(ht,str,arr)         zval_add_ref(arr); zend_hash_str_update(ht, str, sizeof(str)-1, arr);
 
-static inline int Z_BVAL_P(zval *v)
+static sw_inline int Z_BVAL_P(zval *v)
 {
     if (Z_TYPE_P(v) == IS_TRUE)
     {
@@ -141,11 +145,16 @@ static inline int Z_BVAL_P(zval *v)
     }
 }
 
-#define sw_add_assoc_stringl(__arg, __key, __str, __length, __duplicate) sw_add_assoc_stringl_ex(__arg, __key, strlen(__key)+1, __str, __length, __duplicate)
-static inline int sw_add_assoc_stringl_ex(zval *arg, const char *key, size_t key_len, char *str, size_t length,int duplicate)
+//----------------------------------Array API------------------------------------
+#define sw_add_assoc_stringl(__arg, __key, __str, __length, __duplicate)   add_assoc_stringl_ex(__arg, __key, strlen(__key), __str, __length)
+static sw_inline int sw_add_assoc_stringl_ex(zval *arg, const char *key, size_t key_len, char *str, size_t length, int __duplicate)
 {
-    key_len--;
-    return add_assoc_stringl_ex(arg, key, key_len, str, length);
+    return add_assoc_stringl_ex(arg, key, key_len - 1, str, length);
+}
+#define sw_add_assoc_double_ex(arg, key, key_len, d)     add_assoc_double_ex(arg, key, key_len - 1, d)
+static sw_inline int sw_add_assoc_long_ex(zval *arg, const char *key, size_t key_len, long value)
+{
+    return add_assoc_long_ex(arg, key, key_len - 1, value);
 }
 
 #define SW_Z_ARRVAL_P(z)                          Z_ARRVAL_P(z)->ht
@@ -173,6 +182,7 @@ static inline char* sw_php_format_date(char *format, size_t format_len, time_t t
     char *return_str = (char*) emalloc(time->len + 1);
     memcpy(return_str, time->val, time->len);
     return_str[time->len] = 0;
+    zend_string_release(time);
     return return_str;
 }
 
@@ -181,10 +191,10 @@ static inline char * sw_php_url_encode(char *value, size_t value_len, int* exten
     zend_string *str = php_url_encode(value, value_len);
     *exten = str->len;
 
-    char *return_str = (char*) emalloc(str->len);
+    char *return_str = (char*) emalloc(str->len + 1);
     memcpy(return_str, str->val, str->len);
     zend_string_release(str);
-
+    return_str[str->len] = 0;
     return return_str;
 }
 
@@ -200,17 +210,12 @@ static inline char * sw_php_url_encode(char *value, size_t value_len, int* exten
     *retval_ptr_ptr = &phpng_retval;\
     call_user_function_ex(function_table,NULL,function_name,&phpng_retval,param_count,real_params,no_separation,NULL);})
 
-#define sw_php_var_unserialize(rval, p, max, var_hash)\
-php_var_unserialize(*rval, p, max, var_hash)
+#define sw_php_var_unserialize(rval, p, max, var_hash)  php_var_unserialize(*rval, p, max, var_hash)
+#define SW_MAKE_STD_ZVAL(p)             zval _stack_zval_##p; p = &(_stack_zval_##p)
+#define SW_RETURN_STRINGL(s, l, dup)    RETURN_STRINGL(s, l)
+#define SW_RETVAL_STRINGL(s, l, dup)    RETVAL_STRINGL(s, l); if (dup == 0) efree(s)
+#define SW_ALLOC_INIT_ZVAL(p)           p = emalloc(sizeof(zval)); bzero(p, sizeof(zval))
 
-#define SW_MAKE_STD_ZVAL(p)    zval _stack_zval_##p; p = &(_stack_zval_##p)
-
-#define SW_RETURN_STRINGL(z,l,t)                      \
-               zval key;\
-                ZVAL_STRING(&key, z);\
-                RETURN_STR(Z_STR(key))
-
-#define SW_ALLOC_INIT_ZVAL(p)        SW_MAKE_STD_ZVAL(p)
 #define SW_ZEND_FETCH_RESOURCE_NO_RETURN(rsrc, rsrc_type, passed_id, default_id, resource_type_name, resource_type)        \
         (rsrc = (rsrc_type) zend_fetch_resource(Z_RES_P(*passed_id), resource_type_name, resource_type))
 #define SW_ZEND_REGISTER_RESOURCE(return_value, result, le_result)  ZVAL_RES(return_value,zend_register_resource(result, le_result))
@@ -270,7 +275,7 @@ static inline int sw_zend_hash_update(HashTable *ht, char *k, int len ,void * va
     return zend_hash_update(ht, Z_STR(key), val) ? SUCCESS : FAILURE;
 }
 
-static inline int sw_zend_hash_get_current_key( HashTable *ht, char **key, uint32_t *keylen, ulong *num)
+static inline int sw_zend_hash_get_current_key(HashTable *ht, char **key, uint32_t *keylen, ulong *num)
 {
     zend_string *_key_ptr;
     int type = zend_hash_get_current_key(ht, &_key_ptr, (zend_ulong*) num);

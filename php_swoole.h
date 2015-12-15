@@ -24,6 +24,9 @@
 #include "php_globals.h"
 #include "php_main.h"
 
+#include "php_streams.h"
+#include "php_network.h"
+
 #include "zend_interfaces.h"
 #include "zend_exceptions.h"
 #include "zend_variables.h"
@@ -40,7 +43,7 @@
 #include "Client.h"
 #include "async.h"
 
-#define PHP_SWOOLE_VERSION  "1.7.20-beta"
+#define PHP_SWOOLE_VERSION  "1.7.22-alpha"
 #define PHP_SWOOLE_CHECK_CALLBACK
 
 /**
@@ -101,6 +104,7 @@ extern swoole_object_array swoole_objects;
 #define swoole_php_error(level, fmt_str, ...)   if (SWOOLE_G(display_errors)) php_error_docref(NULL TSRMLS_CC, level, fmt_str, ##__VA_ARGS__)
 #define swoole_php_fatal_error(level, fmt_str, ...)   php_error_docref(NULL TSRMLS_CC, level, fmt_str, ##__VA_ARGS__)
 #define swoole_php_sys_error(level, fmt_str, ...)  if (SWOOLE_G(display_errors)) php_error_docref(NULL TSRMLS_CC, level, fmt_str" Error: %s[%d].", ##__VA_ARGS__, strerror(errno), errno)
+#define swoole_efree(p)  if (p) efree(p)
 
 #ifdef SW_ASYNC_MYSQL
 #if defined(SW_HAVE_MYSQLI) && defined(SW_HAVE_MYSQLND)
@@ -113,6 +117,15 @@ extern swoole_object_array swoole_objects;
 #ifdef SW_USE_OPENSSL
 #ifndef HAVE_OPENSSL
 #error "Enable openssl support, But no openssl library."
+#endif
+#endif
+
+#ifdef SW_SOCKETS
+#if PHP_VERSION_ID >= 50301 && (HAVE_SOCKETS || defined(COMPILE_DL_SOCKETS))
+#include "ext/sockets/php_sockets.h"
+#define SWOOLE_SOCKETS_SUPPORT
+#else
+#error "Enable sockets support, But no sockets extension"
 #endif
 #endif
 
@@ -232,6 +245,10 @@ PHP_METHOD(swoole_server, sendto);
 PHP_METHOD(swoole_server, sendwait);
 PHP_METHOD(swoole_server, exist);
 
+#ifdef SWOOLE_SOCKETS_SUPPORT
+PHP_METHOD(swoole_server, getSocket);
+#endif
+
 PHP_FUNCTION(swoole_event_add);
 PHP_FUNCTION(swoole_event_set);
 PHP_FUNCTION(swoole_event_del);
@@ -309,6 +326,10 @@ static sw_inline void* swoole_get_property(zval *object, int property_id)
 
 void swoole_set_object(zval *object, void *ptr);
 void swoole_set_property(zval *object, int property_id, void *ptr);
+
+#ifdef SWOOLE_SOCKETS_SUPPORT
+php_socket *swoole_convert_to_socket(int sock);
+#endif
 
 zval *php_swoole_get_recv_data(zval *,swEventData *req TSRMLS_DC);
 int php_swoole_get_send_data(zval *zdata, char **str TSRMLS_DC);

@@ -17,17 +17,6 @@
  */
 
 #include "php_swoole.h"
-#include "php_streams.h"
-#include "php_network.h"
-
-#ifdef SW_SOCKETS
-#if PHP_VERSION_ID >= 50301 && (HAVE_SOCKETS || defined(COMPILE_DL_SOCKETS))
-#include "ext/sockets/php_sockets.h"
-#define SWOOLE_SOCKETS_SUPPORT
-#else
-#error "Enable sockets support, But no sockets extension"
-#endif
-#endif
 
 typedef struct
 {
@@ -225,6 +214,46 @@ static int swoole_convert_to_fd(zval *zfd)
     }
     return socket_fd;
 }
+
+#ifdef SWOOLE_SOCKETS_SUPPORT
+php_socket* swoole_convert_to_socket(int sock)
+{
+#if PHP_MAJOR_VERSION < 7
+    TSRMLS_FETCH_FROM_CTX(sw_thread_ctx ? sw_thread_ctx : NULL);
+#endif
+    php_socket *socket_object = emalloc(sizeof *socket_object);
+    bzero(socket_object, sizeof(php_socket));
+    socket_object->bsd_socket = sock;
+    socket_object->blocking = 1;
+
+    struct sockaddr_storage addr;
+    socklen_t addr_len = sizeof(addr);
+
+    if (getsockname(sock, (struct sockaddr*) &addr, &addr_len) == 0)
+    {
+        socket_object->type = addr.ss_family;
+    }
+    else
+    {
+        swoole_php_sys_error(E_WARNING, "unable to obtain socket family");
+        error:
+        efree(socket_object);
+        return NULL;
+    }
+
+    int t = fcntl(sock, F_GETFL);
+    if (t == -1)
+    {
+        swoole_php_sys_error(E_WARNING, "unable to obtain blocking state");
+        goto error;
+    }
+    else
+    {
+        socket_object->blocking = !(t & O_NONBLOCK);
+    }
+    return socket_object;
+}
+#endif
 
 PHP_FUNCTION(swoole_event_add)
 {
@@ -485,10 +514,16 @@ PHP_FUNCTION(swoole_event_del)
     }
 
     swConnection *socket = swReactor_get(SwooleG.main_reactor, socket_fd);
-    efree(socket->object);
+    if (socket->object)
+    {
+        efree(socket->object);
+    }
     socket->active = 0;
-
-    int ret = SwooleG.main_reactor->del(SwooleG.main_reactor, socket_fd);
+    int ret = 0;
+    if (socket->fd)
+    {
+        ret = SwooleG.main_reactor->del(SwooleG.main_reactor, socket_fd);
+    }
     SW_CHECK_RETURN(ret);
 }
 
@@ -508,9 +543,7 @@ PHP_FUNCTION(swoole_event_wait)
 {
     if (!SwooleG.main_reactor)
     {
-        swoole_php_fatal_error(E_WARNING, "reactor no ready, cannot use swoole_event_wait.");
-        RETURN_FALSE;
+        return;
     }
     php_swoole_event_wait();
 }
-

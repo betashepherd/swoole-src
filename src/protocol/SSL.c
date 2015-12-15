@@ -22,6 +22,7 @@
 static int openssl_init = 0;
 
 static const SSL_METHOD *swSSL_get_method(int method);
+static int swSSL_verify_callback(int ok, X509_STORE_CTX *x509_store);
 
 static const SSL_METHOD *swSSL_get_method(int method)
 {
@@ -76,7 +77,7 @@ void swSSL_init(void)
     openssl_init = 1;
 }
 
-SSL_CTX* swSSL_get_server_context(char *cert_file, char *key_file, int method)
+SSL_CTX* swSSL_get_context(int method, char *cert_file, char *key_file)
 {
     if (!openssl_init)
     {
@@ -93,48 +94,98 @@ SSL_CTX* swSSL_get_server_context(char *cert_file, char *key_file, int method)
     SSL_CTX_set_options(ssl_context, SSL_OP_SSLREF2_REUSE_CERT_TYPE_BUG);
     SSL_CTX_set_options(ssl_context, SSL_OP_MICROSOFT_BIG_SSLV3_BUFFER);
 
-    /*
-     * set the local certificate from CertFile
-     */
-    if (SSL_CTX_use_certificate_file(ssl_context, cert_file, SSL_FILETYPE_PEM) <= 0)
+    if (cert_file)
     {
-        ERR_print_errors_fp(stderr);
-        return NULL;
+        /*
+         * set the local certificate from CertFile
+         */
+        if (SSL_CTX_use_certificate_file(ssl_context, cert_file, SSL_FILETYPE_PEM) <= 0)
+        {
+            ERR_print_errors_fp(stderr);
+            return NULL;
+        }
+        /*
+         * set the private key from KeyFile (may be the same as CertFile)
+         */
+        if (SSL_CTX_use_PrivateKey_file(ssl_context, key_file, SSL_FILETYPE_PEM) <= 0)
+        {
+            ERR_print_errors_fp(stderr);
+            return NULL;
+        }
+        /*
+         * verify private key
+         */
+        if (!SSL_CTX_check_private_key(ssl_context))
+        {
+            swWarn("Private key does not match the public certificate");
+            return NULL;
+        }
     }
-    /*
-     * set the private key from KeyFile (may be the same as CertFile)
-     */
-    if (SSL_CTX_use_PrivateKey_file(ssl_context, key_file, SSL_FILETYPE_PEM) <= 0)
-    {
-        ERR_print_errors_fp(stderr);
-        return NULL;
-    }
-    /*
-     * verify private key
-     */
-    if (!SSL_CTX_check_private_key(ssl_context))
-    {
-        swWarn("Private key does not match the public certificate");
-        return NULL;
-    }
+
     return ssl_context;
 }
 
-SSL_CTX* swSSL_get_client_context(int method)
+
+static int swSSL_verify_callback(int ok, X509_STORE_CTX *x509_store)
 {
-    if (!openssl_init)
+#if 0
+    char *subject, *issuer;
+    int err, depth;
+    X509 *cert;
+    X509_NAME *sname, *iname;
+
+    X509_STORE_CTX_get_ex_data(x509_store, SSL_get_ex_data_X509_STORE_CTX_idx());
+    cert = X509_STORE_CTX_get_current_cert(x509_store);
+    err = X509_STORE_CTX_get_error(x509_store);
+    depth = X509_STORE_CTX_get_error_depth(x509_store);
+
+    sname = X509_get_subject_name(cert);
+    subject = sname ? X509_NAME_oneline(sname, NULL, 0) : "(none)";
+
+    iname = X509_get_issuer_name(cert);
+    issuer = iname ? X509_NAME_oneline(iname, NULL, 0) : "(none)";
+
+    swWarn("verify:%d, error:%d, depth:%d, subject:\"%s\", issuer:\"%s\"", ok, err, depth, subject, issuer);
+
+    if (sname)
     {
-        swSSL_init();
+        OPENSSL_free(subject);
     }
 
-    SSL_CTX *context = SSL_CTX_new(swSSL_get_method(method));
-    if (context == NULL)
+    if (iname)
     {
-        ERR_print_errors_fp(stderr);
-        return NULL;
+        OPENSSL_free(issuer);
+    }
+#endif
+
+    return 1;
+}
+
+int swSSL_set_client_certificate(SSL_CTX *ctx, char *cert_file, int depth)
+{
+    STACK_OF(X509_NAME) *list;
+
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, swSSL_verify_callback);
+    SSL_CTX_set_verify_depth(ctx, depth);
+
+    if (SSL_CTX_load_verify_locations(ctx, cert_file, NULL) == 0)
+    {
+        swWarn("SSL_CTX_load_verify_locations(\"%s\") failed.", cert_file);
+        return SW_ERR;
     }
 
-    return context;
+    ERR_clear_error();
+    list = SSL_load_client_CA_file(cert_file);
+    if (list == NULL)
+    {
+        swWarn("SSL_load_client_CA_file(\"%s\") failed.", cert_file);
+        return SW_ERR;
+    }
+
+    ERR_clear_error();
+    SSL_CTX_set_client_CA_list(ctx, list);
+
+    return SW_OK;
 }
 
 int swSSL_accept(swConnection *conn)
@@ -195,8 +246,12 @@ int swSSL_connect(swConnection *conn)
 
 void swSSL_close(swConnection *conn)
 {
+    SSL_set_quiet_shutdown(conn->ssl, 1);
+    SSL_set_shutdown(conn->ssl, SSL_RECEIVED_SHUTDOWN | SSL_SENT_SHUTDOWN);
+
     SSL_shutdown(conn->ssl);
     SSL_free(conn->ssl);
+    conn->ssl = NULL;
 }
 
 ssize_t swSSL_recv(swConnection *conn, void *__buf, size_t __n)
@@ -281,7 +336,7 @@ int swSSL_create(swConnection *conn, SSL_CTX* ssl_context, int flags)
     return SW_OK;
 }
 
-void swSSL_free(SSL_CTX* ssl_context)
+void swSSL_free_context(SSL_CTX* ssl_context)
 {
     if (ssl_context)
     {

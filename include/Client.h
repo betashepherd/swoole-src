@@ -67,7 +67,9 @@ typedef struct _swClient
 	uint32_t wait_length;
 
 #ifdef SW_USE_OPENSSL
-    uint8_t open_ssl;
+    uint8_t open_ssl :1;
+    uint8_t ssl_disable_compress :1;
+    uint8_t ssl_verify :1;
     char *ssl_cert_file;
     char *ssl_key_file;
     SSL_CTX *ssl_context;
@@ -79,9 +81,9 @@ typedef struct _swClient
 	void (*onClose)(struct _swClient *cli, int fd, int from_id);
 
 	int (*connect)(struct _swClient *cli, char *host, int port, double _timeout, int sock_flag);
-	int (*send)(struct _swClient *cli, char *data, int length);
+	int (*send)(struct _swClient *cli, char *data, int length, int flags);
 	int (*sendfile)(struct _swClient *cli, char *filename);
-	int (*recv)(struct _swClient *cli, char *data, int len, int waitall);
+	int (*recv)(struct _swClient *cli, char *data, int len, int flags);
 	int (*close)(struct _swClient *cli);
 
 } swClient;

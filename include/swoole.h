@@ -124,6 +124,7 @@ int daemon(int nochdir, int noclose);
 #include "list.h"
 #include "RingQueue.h"
 #include "array.h"
+#include "error.h"
 
 #define SW_TIMEO_SEC           0
 #define SW_TIMEO_USEC          3000000
@@ -267,6 +268,11 @@ snprintf(sw_error,SW_ERROR_MSG_SIZE,"%s#%d: "str" Error: %s[%d].",__func__,__LIN
 swLog_put(SW_LOG_WARN, sw_error);\
 SwooleGS->lock.unlock(&SwooleGS->lock)
 
+#define swRuntimeError(error,str,...)        SwooleGS->lock.lock(&SwooleGS->lock);\
+snprintf(sw_error,SW_ERROR_MSG_SIZE,"(ERROR %d): "str,error,##__VA_ARGS__);\
+swLog_put(SW_LOG_ERROR, sw_error);\
+SwooleGS->lock.unlock(&SwooleGS->lock)
+
 #ifdef SW_DEBUG_REMOTE_OPEN
 #define swDebug(str,...) int __debug_log_n = snprintf(sw_error,SW_ERROR_MSG_SIZE,str,##__VA_ARGS__);\
 write(SwooleG.debug_fd, sw_error, __debug_log_n);
@@ -292,6 +298,7 @@ enum swTraceType
     SW_TRACE_WORKER  = 6,
     SW_TRACE_MEMORY  = 7,
     SW_TRACE_REACTOR = 8,
+    SW_TRACE_PHP     = 9,
 };
 
 #if SW_LOG_TRACE_OPEN == 1
@@ -393,8 +400,6 @@ typedef struct _swConnection
 
     uint32_t tcp_nopush :1;
     uint32_t tcp_nodelay :1;
-
-    uint32_t http_buffered :1;
 
     uint32_t ssl_want_read :1;
     uint32_t ssl_want_write :1;
@@ -853,10 +858,18 @@ uint64_t swoole_hash_key(char *str, int str_len);
 uint32_t swoole_common_multiple(uint32_t u, uint32_t v);
 uint32_t swoole_common_divisor(uint32_t u, uint32_t v);
 
+static sw_inline uint16_t swoole_swap_endian16(uint16_t x)
+{
+    return (((x & 0xff) << 8) | ((x & 0xff00) >> 8));
+}
+
+static sw_inline uint32_t swoole_swap_endian32(uint32_t x)
+{
+    return (((x & 0xff) << 24) | ((x & 0xff00) << 8) | ((x & 0xff0000) >> 8) | ((x & 0xff000000) >> 24));
+}
+
 static sw_inline int32_t swoole_unpack(char type, void *data)
 {
-    int64_t tmp;
-
     switch(type)
     {
     /*-------------------------16bit-----------------------------*/
@@ -875,14 +888,13 @@ static sw_inline int32_t swoole_unpack(char type, void *data)
      */
     case 'n':
         return ntohs(*((uint16_t *) data));
+    /**
+     * unsigned short (always 32 bit, little endian byte order)
+     */
+    case 'v':
+        return swoole_swap_endian16(ntohs(*((uint16_t *) data)));
 
     /*-------------------------32bit-----------------------------*/
-    /**
-     * unsigned long (always 32 bit, big endian byte order)
-     */
-    case 'N':
-        tmp = *((uint32_t *) data);
-        return ntohl(tmp);
     /**
      * unsigned long (always 32 bit, machine byte order)
      */
@@ -893,6 +905,16 @@ static sw_inline int32_t swoole_unpack(char type, void *data)
      */
     case 'l':
         return *((int *) data);
+    /**
+     * unsigned long (always 32 bit, big endian byte order)
+     */
+    case 'N':
+        return ntohl(*((uint32_t *) data));
+    /**
+     * unsigned short (always 32 bit, little endian byte order)
+     */
+    case 'V':
+        return swoole_swap_endian32(ntohl(*((uint32_t *) data)));
 
     default:
         return *((uint32_t *) data);
@@ -1004,7 +1026,7 @@ uint64_t swoole_ntoh64(uint64_t n64);
 int swSocket_listen(int type, char *host, int port, int backlog);
 int swSocket_create(int type);
 int swSocket_wait(int fd, int timeout_ms, int events);
-void swSocket_clean(int fd, void *buf, int len);
+void swSocket_clean(int fd);
 int swSocket_sendto_blocking(int fd, void *__buf, size_t __n, int flag, struct sockaddr *__addr, socklen_t __addr_len);
 int swSocket_set_buffer_size(int fd, int buffer_size);
 int swSocket_udp_sendto(int server_sock, char *dst_ip, int dst_port, char *data, uint32_t len);
@@ -1175,6 +1197,16 @@ struct _swWorker
 	uint8_t redirect_stdout;
 
 	/**
+     * redirect stdin to pipe_worker
+     */
+    uint8_t redirect_stdin;
+
+    /**
+     * redirect stderr to pipe_worker
+     */
+    uint8_t redirect_stderr;
+
+	/**
 	 * worker status, IDLE or BUSY
 	 */
     uint8_t status;
@@ -1189,10 +1221,7 @@ struct _swWorker
      */
     sw_atomic_t tasking_num;
 
-	/**
-	 * redirect stdin to pipe_worker
-	 */
-	uint8_t redirect_stdin;
+
 
 	/**
 	 * worker id
@@ -1268,10 +1297,10 @@ struct _swProcessPool
 //----------------------------------------Reactor---------------------------------------
 enum SW_EVENTS
 {
-	SW_EVENT_DEAULT = 256,
-	SW_EVENT_READ = 1u << 9,
-	SW_EVENT_WRITE = 1u << 10,
-	SW_EVENT_ERROR = 1u << 11,
+    SW_EVENT_DEAULT = 256,
+    SW_EVENT_READ = 1u << 9,
+    SW_EVENT_WRITE = 1u << 10,
+    SW_EVENT_ERROR = 1u << 11,
 };
 
 static sw_inline int swReactor_error(swReactor *reactor)
@@ -1453,7 +1482,7 @@ typedef struct _swTimer_node
     struct _swTimer_node *next, *prev;
     struct timeval lasttime;
     void *data;
-    uint32_t exec_msec;
+    int64_t exec_msec;
     uint32_t interval;
     long id;
     uint8_t remove :1;
@@ -1527,7 +1556,6 @@ typedef struct
 
     swProcessPool task_workers;
     swProcessPool event_workers;
-    swProcessPool user_workers;
 
 } swServerGS;
 
@@ -1614,7 +1642,6 @@ typedef struct
     /**
      *  task worker process max
      */
-    uint16_t task_worker_max;
     uint8_t task_recycle_num;
     char *task_tmpdir;
     uint16_t task_tmpdir_len;
